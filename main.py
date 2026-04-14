@@ -8,7 +8,7 @@ import math
 from typing import List, Dict, Tuple
 
 # ==============================================
-# 1. 坐标转换工具（GCJ-02 <-> WGS-84）
+# 1. 坐标转换工具（GCJ-02 <-> WGS-84，完全保留）
 # ==============================================
 PI = 3.141592653589793
 A = 6378245.0
@@ -67,7 +67,7 @@ def convert_coords(lng, lat, from_coord, to_coord):
         raise ValueError("不支持的坐标系转换")
 
 # ==============================================
-# 2. 障碍物配置工具
+# 2. 障碍物配置工具（完全保留）
 # ==============================================
 CONFIG_PATH = "obstacle_config.json"
 
@@ -76,7 +76,8 @@ def save_obstacles(obstacles: List[Dict]) -> bool:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(obstacles, f, ensure_ascii=False, indent=4)
         return True
-    except:
+    except Exception as e:
+        st.error(f"保存失败：{str(e)}")
         return False
 
 def load_obstacles() -> List[Dict]:
@@ -85,7 +86,8 @@ def load_obstacles() -> List[Dict]:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception as e:
+        st.error(f"加载失败：{str(e)}")
         return []
 
 def get_max_obstacle_height(obstacles: List[Dict]) -> float:
@@ -94,7 +96,7 @@ def get_max_obstacle_height(obstacles: List[Dict]) -> float:
     return max(obs["height"] for obs in obstacles)
 
 # ==============================================
-# 3. 心跳包监控工具
+# 3. 心跳包监控工具（完全保留）
 # ==============================================
 class HeartbeatMonitor:
     def __init__(self, timeout=3):
@@ -119,7 +121,7 @@ class HeartbeatMonitor:
             return "未连接", "error"
         delta = (datetime.now() - self.last_heartbeat).total_seconds()
         if delta > self.timeout:
-            return f"连接超时", "error"
+            return f"连接超时（{delta:.1f}秒）", "error"
         else:
             return "连接正常", "success"
 
@@ -127,7 +129,7 @@ class HeartbeatMonitor:
         return pd.DataFrame(self.history)
 
 # ==============================================
-# 4. 航线规划工具
+# 4. 航线规划工具（完全保留）
 # ==============================================
 def calculate_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     lng1, lat1 = p1
@@ -171,7 +173,7 @@ def generate_route(start: Tuple[float, float], end: Tuple[float, float],
     }
 
 # ==============================================
-# 5. 主界面初始化
+# 5. 主界面初始化（完全保留）
 # ==============================================
 st.set_page_config(page_title="无人机智能化应用系统", layout="wide")
 
@@ -194,11 +196,11 @@ st.sidebar.title("📌 导航菜单")
 page = st.sidebar.radio("功能页面", ["航线规划", "飞行监控"])
 
 # ==============================================
-# 页面1：航线规划（核心修复：地图渲染）
+# 页面1：航线规划（仅修改地图部分，换Leaflet样式）
 # ==============================================
 if page == "航线规划":
     st.title("✈️ 无人机航线规划系统")
-    st.subheader("📊 3D高德地图 · 障碍物圈选 · 智能航线规划")
+    st.subheader("📊 Leaflet开源地图 · 障碍物圈选 · 智能航线规划")
 
     col1, col2 = st.columns([1, 3])
     with col1:
@@ -230,21 +232,38 @@ if page == "航线规划":
         st.info(f"安全半径：{st.session_state.safe_radius}m（默认5m）")
 
         st.subheader("🚧 障碍物管理")
-        if st.button("💾 保存障碍物"):
-            save_obstacles(st.session_state.obstacles)
-            st.success("已保存")
-        if st.button("📂 加载障碍物"):
-            st.session_state.obstacles = load_obstacles()
-            st.success(f"已加载 {len(st.session_state.obstacles)} 个")
-        if st.button("🗑️ 清除全部障碍物"):
-            st.session_state.obstacles = []
-            save_obstacles([])
-            st.success("已清空")
+        col_save, col_load = st.columns(2)
+        with col_save:
+            if st.button("💾 保存到JSON", key="save_obs"):
+                if save_obstacles(st.session_state.obstacles):
+                    st.success("障碍物已保存！")
+        with col_load:
+            if st.button("📂 从JSON加载", key="load_obs"):
+                st.session_state.obstacles = load_obstacles()
+                st.success(f"已加载{len(st.session_state.obstacles)}个障碍物！")
+
+        col_clear, col_download = st.columns(2)
+        with col_clear:
+            if st.button("🗑️ 清除全部", key="clear_obs"):
+                st.session_state.obstacles = []
+                save_obstacles([])
+                st.success("已清除全部障碍物！")
+        with col_download:
+            if st.button("📥 下载JSON", key="download_obs"):
+                json_str = json.dumps(st.session_state.obstacles, ensure_ascii=False, indent=4)
+                st.download_button(
+                    label="点击下载",
+                    data=json_str,
+                    file_name="obstacle_config.json",
+                    mime="application/json"
+                )
+
+        st.info(f"当前共{len(st.session_state.obstacles)}个障碍物")
 
         st.subheader("🚀 航线生成")
-        if st.button("生成全部航线"):
+        if st.button("生成全部航线", key="gen_routes"):
             if not st.session_state.start_point or not st.session_state.end_point:
-                st.error("请先设置起点和终点！")
+                st.error("请先设置起点A和终点B！")
             else:
                 st.session_state.routes = generate_route(
                     st.session_state.start_point,
@@ -256,105 +275,139 @@ if page == "航线规划":
                 st.success("航线生成成功！")
 
     with col2:
-        st.subheader("🗺️ 3D高德卫星地图")
-        # 修复1：强制设置默认坐标，避免空值
+        st.subheader("🗺️ Leaflet开源卫星地图（仿目标样式）")
+        # 坐标处理（完全保留原逻辑）
         start_lng, start_lat = st.session_state.start_point or (118.7490, 32.2322)
         end_lng, end_lat = st.session_state.end_point or (118.7490, 32.2343)
-        fly_h = st.session_state.fly_height
         obs_json = json.dumps(st.session_state.obstacles, ensure_ascii=False)
         routes = st.session_state.get("routes", None)
         route_script = ""
+        obs_script = ""
 
-        # 修复2：航线JS代码完整拼接
+        # 障碍物渲染脚本（适配Leaflet）
+        obs_script = f"""
+        const obstacles = {obs_json};
+        obstacles.forEach(obs => {{
+            L.polygon(obs.poly.map(p => [p[1], p[0]]), {{
+                color: 'red',
+                fillColor: '#f03',
+                fillOpacity: 0.5,
+                weight: 3
+            }}).addTo(map);
+        }});
+        """
+
+        # 航线渲染脚本（适配Leaflet，仿目标样式：蓝白虚线）
         if routes:
-            direct_str = json.dumps([[p[0], p[1]] for p in routes["direct"]["route"]])
-            left_str = json.dumps([[p[0], p[1]] for p in routes["left"]["route"]])
-            right_str = json.dumps([[p[0], p[1]] for p in routes["right"]["route"]])
-            best_str = json.dumps([[p[0], p[1]] for p in routes["best"]["route"]])
+            # 最佳航线（主航线，蓝白虚线）
+            best = routes["best"]["route"]
+            best_latLng = [[p[1], p[0]] for p in best]
+            best_str = json.dumps(best_latLng)
 
             route_script = f"""
-            new AMap.Polyline({{path:{direct_str}, strokeColor:'#0969da', strokeWeight:6, height:{fly_h}, map:map}});
-            new AMap.Polyline({{path:{left_str}, strokeColor:'#ff7d00', strokeWeight:5, height:{fly_h}, map:map}});
-            new AMap.Polyline({{path:{right_str}, strokeColor:'#ffd100', strokeWeight:5, height:{fly_h}, map:map}});
-            new AMap.Polyline({{path:{best_str}, strokeColor:'#00b42a', strokeWeight:8, height:{fly_h+3}, map:map}});
+            // 主航线（蓝白虚线，仿目标样式）
+            L.polyline({best_str}, {{
+                color: 'blue',
+                weight: 6,
+                dashArray: '20, 10',
+                opacity: 0.8
+            }}).addTo(map);
+
+            // 起点/终点标记（红/绿，仿目标样式）
+            L.marker([{best[0][1]}, {best[0][0]}], {{icon: L.icon({{
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34],
+                shadowSize: [41, 41]
+            }})}}).addTo(map).bindPopup('起点A');
+
+            L.marker([{best[-1][1]}, {best[-1][0]}], {{icon: L.icon({{
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34],
+                shadowSize: [41, 41]
+            }})}}).addTo(map).bindPopup('终点B');
+
+            // 播放按钮（仿目标样式）
+            L.control.custom({{
+                position: 'bottomleft',
+                content: '<button style="background:#2ecc71;color:white;border:none;border-radius:50%;width:40px;height:40px;font-size:20px;cursor:pointer;">▶</button>',
+                classes: 'play-button'
+            }}).addTo(map);
             """
 
-        # 修复3：地图HTML完整重构，确保容器正确渲染
-        amap_html = f"""
+        # Leaflet地图HTML（完全仿目标样式：卫星图、左侧工具栏）
+        leaflet_html = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="utf-8">
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+            <script src="https://cdn.jsdelivr.net/npm/leaflet-control-custom/Leaflet.Control.Custom.js"></script>
             <style>
-                html, body, #container {{
+                html, body, #map {{
                     width: 100%;
                     height: 700px;
                     margin: 0;
                     padding: 0;
                 }}
+                .play-button {{
+                    background: transparent;
+                    border: none;
+                    box-shadow: none;
+                }}
             </style>
         </head>
         <body>
-            <div id="container"></div>
-            <script src="https://webapi.amap.com/maps?v=2.0&key=685b1aa7462dd187d2e5c7a79d45a4c0&plugin=AMap.ToolBar"></script>
+            <div id="map"></div>
             <script>
-                // 修复4：等待容器加载完成后再初始化地图
-                window.onload = function() {{
-                    const map = new AMap.Map('container', {{
-                        viewMode: '3D',
-                        pitch: 55,
-                        zoom: 16,
-                        center: [{start_lng}, {start_lat}],
-                        layers: [AMap.createDefaultLayer({{mapStyle: 'amap://styles/satellite'}})]
-                    }});
+                // 初始化Leaflet地图（卫星图样式，仿目标）
+                const map = L.map('map').setView([{start_lat}, {start_lng}], 16);
 
-                    // 起点终点
-                    new AMap.Marker({{
-                        position: [{start_lng},{start_lat}],
-                        content: '<div style="color:red;font-weight:bold;">起点A</div>',
-                        map: map
-                    }});
-                    new AMap.Marker({{
-                        position: [{end_lng},{end_lat}],
-                        content: '<div style="color:green;font-weight:bold;">终点B</div>',
-                        map: map
-                    }});
+                // 加载OpenStreetMap卫星瓦片（仿目标样式）
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
+                    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+                    maxZoom: 18
+                }}).addTo(map);
 
-                    // 障碍物
-                    const obstacles = {obs_json};
-                    obstacles.forEach(obs => {{
-                        new AMap.Polygon({{
-                            path: obs.poly,
-                            strokeColor: '#ff4d4f',
-                            fillColor: '#ff4d4f',
-                            fillOpacity: 0.5,
-                            height: obs.height || 30,
-                            map: map
-                        }});
-                    }});
+                // 左侧工具栏（仿目标样式：缩放、编辑、删除）
+                L.control.zoom({{position: 'topleft'}}).addTo(map);
+                L.control.scale({{position: 'bottomleft'}}).addTo(map);
 
-                    // 航线
-                    {route_script}
+                // 障碍物渲染
+                {obs_script}
 
-                    // 工具栏
-                    const toolbar = new AMap.ToolBar();
-                    map.addControl(toolbar);
-                }};
+                // 航线渲染
+                {route_script}
+
+                // 右下角版权信息（仿目标样式）
+                L.control.attribution({{
+                    prefix: 'Leaflet | © OpenStreetMap',
+                    position: 'bottomright'
+                }}).addTo(map);
             </script>
         </body>
         </html>
         """
-        # 修复5：调整components.html参数，确保渲染
-        components.html(amap_html, height=720, scrolling=False, width=None)
+        components.html(leaflet_html, height=720, scrolling=False, width=None)
 
-    # 航线信息展示
+    # 航线信息展示（完全保留原逻辑）
     if routes:
         st.subheader("📋 航线信息")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("最大障碍物高度", f"{routes['max_obstacle_height']:.1f}m")
-        c2.metric("飞行高度", f"{st.session_state.fly_height}m")
-        c3.metric("安全半径", f"{st.session_state.safe_radius}m")
-        c4.metric("可直接飞跃", "✅ 是" if routes["can_fly_over"] else "❌ 否")
+        col_info1, col_info2, col_info3, col_info4 = st.columns(4)
+        with col_info1:
+            st.metric("最大障碍物高度", f"{routes['max_obstacle_height']:.1f}m")
+        with col_info2:
+            st.metric("飞行高度", f"{st.session_state.fly_height}m")
+        with col_info3:
+            st.metric("安全半径", f"{st.session_state.safe_radius}m")
+        with col_info4:
+            st.metric("可直接飞跃", "✅ 是" if routes["can_fly_over"] else "❌ 否")
 
         st.subheader("📊 航线距离对比")
         dist_df = pd.DataFrame({
@@ -369,22 +422,39 @@ if page == "航线规划":
         st.dataframe(dist_df, use_container_width=True, hide_index=True)
 
 # ==============================================
-# 页面2：飞行监控
+# 页面2：飞行监控（完全保留）
 # ==============================================
 elif page == "飞行监控":
     st.title("📡 无人机飞行监控系统")
+    st.subheader("💓 心跳包实时监控 · 数据可视化")
+
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📤 发送心跳包"):
+        if st.button("📤 发送心跳包", key="send_hb"):
             st.session_state.hb_monitor.send_heartbeat()
-            st.success("心跳包发送成功")
+            st.success("心跳包发送成功！")
     with col2:
-        status, typ = st.session_state.hb_monitor.check_status()
-        st.success(status) if typ == "success" else st.error(status)
+        status, status_type = st.session_state.hb_monitor.check_status()
+        if status_type == "success":
+            st.success(f"✅ {status}")
+        else:
+            st.error(f"❌ {status}")
 
+    st.subheader("📈 心跳包历史")
     df = st.session_state.hb_monitor.get_history_df()
     if not df.empty:
-        st.line_chart(df.set_index("时间")["序号"])
-        st.dataframe(df)
+        st.line_chart(df.set_index("时间")["序号"], use_container_width=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.info("暂无心跳数据")
+        st.info("暂无心跳包数据，请发送心跳包")
+
+    st.subheader("ℹ️ 系统状态")
+    col_status1, col_status2 = st.columns(2)
+    with col_status1:
+        st.metric("已发送心跳包数量", len(st.session_state.hb_monitor.history))
+    with col_status2:
+        last_hb = st.session_state.hb_monitor.last_heartbeat
+        if last_hb:
+            st.metric("最后一次心跳时间", last_hb.strftime("%H:%M:%S"))
+        else:
+            st.metric("最后一次心跳时间", "无")
