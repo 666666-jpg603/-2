@@ -196,7 +196,7 @@ st.sidebar.title("📌 导航菜单")
 page = st.sidebar.radio("功能页面", ["航线规划", "飞行监控"])
 
 # ==============================================
-# 页面1：航线规划（仅修改地图部分，换Leaflet样式）
+# 页面1：航线规划（仅修改起点、终点默认值）
 # ==============================================
 if page == "航线规划":
     st.title("✈️ 无人机航线规划系统")
@@ -211,16 +211,18 @@ if page == "航线规划":
 
         st.subheader("📍 起点/终点设置")
         st.write("**起点A**")
-        a_lat = st.number_input("起点纬度", value=32.2322, format="%.6f")
-        a_lng = st.number_input("起点经度", value=118.7490, format="%.6f")
+        a_lat = st.number_input("起点纬度", value=32.232945, format="%.6f")
+        a_lng = st.number_input("起点经度", value=118.746956, format="%.6f")
+        
         if st.button("✅ 设置A点"):
             lng_gcj, lat_gcj = convert_coords(a_lng, a_lat, st.session_state.input_coord, "GCJ-02")
             st.session_state.start_point = (lng_gcj, lat_gcj)
             st.success("起点A设置成功！")
 
         st.write("**终点B**")
-        b_lat = st.number_input("终点纬度", value=32.2343, format="%.6f")
-        b_lng = st.number_input("终点经度", value=118.7490, format="%.6f")
+        b_lat = st.number_input("终点纬度", value=32.235204, format="%.6f")
+        b_lng = st.number_input("终点经度", value=118.751589, format="%.6f")
+        
         if st.button("✅ 设置B点"):
             lng_gcj, lat_gcj = convert_coords(b_lng, b_lat, st.session_state.input_coord, "GCJ-02")
             st.session_state.end_point = (lng_gcj, lat_gcj)
@@ -276,15 +278,15 @@ if page == "航线规划":
 
     with col2:
         st.subheader("🗺️ Leaflet开源卫星地图（仿目标样式）")
-        # 坐标处理（完全保留原逻辑）
-        start_lng, start_lat = st.session_state.start_point or (118.7490, 32.2322)
-        end_lng, end_lat = st.session_state.end_point or (118.7490, 32.2343)
+        start_lng, start_lat = st.session_state.start_point or (118.746956, 32.232945)
+        end_lng, end_lat = st.session_state.end_point or (118.751589, 32.235204)
+        
         obs_json = json.dumps(st.session_state.obstacles, ensure_ascii=False)
         routes = st.session_state.get("routes", None)
         route_script = ""
         obs_script = ""
 
-        # 障碍物渲染脚本（适配Leaflet）
+        # 障碍物渲染脚本
         obs_script = f"""
         const obstacles = {obs_json};
         obstacles.forEach(obs => {{
@@ -297,15 +299,14 @@ if page == "航线规划":
         }});
         """
 
-        # 航线渲染脚本（适配Leaflet，仿目标样式：蓝白虚线）
+        # 航线渲染脚本
         if routes:
-            # 最佳航线（主航线，蓝白虚线）
             best = routes["best"]["route"]
             best_latLng = [[p[1], p[0]] for p in best]
             best_str = json.dumps(best_latLng)
 
             route_script = f"""
-            // 主航线（蓝白虚线，仿目标样式）
+            // 主航线
             L.polyline({best_str}, {{
                 color: 'blue',
                 weight: 6,
@@ -313,7 +314,7 @@ if page == "航线规划":
                 opacity: 0.8
             }}).addTo(map);
 
-            // 起点/终点标记（红/绿，仿目标样式）
+            // 起点/终点标记
             L.marker([{best[0][1]}, {best[0][0]}], {{icon: L.icon({{
                 iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
                 shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
@@ -332,7 +333,7 @@ if page == "航线规划":
                 shadowSize: [41, 41]
             }})}}).addTo(map).bindPopup('终点B');
 
-            // 播放按钮（仿目标样式）
+            // 播放按钮
             L.control.custom({{
                 position: 'bottomleft',
                 content: '<button style="background:#2ecc71;color:white;border:none;border-radius:50%;width:40px;height:40px;font-size:20px;cursor:pointer;">▶</button>',
@@ -340,14 +341,14 @@ if page == "航线规划":
             }}).addTo(map);
             """
 
-        # Leaflet地图HTML（完全仿目标样式：卫星图、左侧工具栏）
+        # Leaflet地图HTML
         leaflet_html = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="utf-8">
-            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
             <script src="https://cdn.jsdelivr.net/npm/leaflet-control-custom/Leaflet.Control.Custom.js"></script>
             <style>
                 html, body, #map {{
@@ -366,26 +367,19 @@ if page == "航线规划":
         <body>
             <div id="map"></div>
             <script>
-                // 初始化Leaflet地图（卫星图样式，仿目标）
                 const map = L.map('map').setView([{start_lat}, {start_lng}], 16);
 
-                // 加载OpenStreetMap卫星瓦片（仿目标样式）
                 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
-                    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+                    attribution: 'Tiles &copy; Esri',
                     maxZoom: 18
                 }}).addTo(map);
 
-                // 左侧工具栏（仿目标样式：缩放、编辑、删除）
                 L.control.zoom({{position: 'topleft'}}).addTo(map);
                 L.control.scale({{position: 'bottomleft'}}).addTo(map);
 
-                // 障碍物渲染
                 {obs_script}
-
-                // 航线渲染
                 {route_script}
 
-                // 右下角版权信息（仿目标样式）
                 L.control.attribution({{
                     prefix: 'Leaflet | © OpenStreetMap',
                     position: 'bottomright'
@@ -396,7 +390,7 @@ if page == "航线规划":
         """
         components.html(leaflet_html, height=720, scrolling=False, width=None)
 
-    # 航线信息展示（完全保留原逻辑）
+    # 航线信息展示
     if routes:
         st.subheader("📋 航线信息")
         col_info1, col_info2, col_info3, col_info4 = st.columns(4)
