@@ -21,7 +21,7 @@ DEFAULT_A_GCJ = [118.746956, 32.232945]
 DEFAULT_B_GCJ = [118.751589, 32.235204]
 
 GAODE_SATELLITE_URL = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-GAODE_VECTOR_URL = "https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
+GAODE_VECTOR_URL = "httpswebrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
 
 # ==================== 坐标系转换 ====================
 def gcj02_to_wgs84(lng, lat):
@@ -121,7 +121,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 平行偏移绕行（已修复：左右完全分离） ====================
+# ==================== 平行偏移绕行（彻底修复向右绕行失效） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     dx = end[0] - start[0]
     dy = end[1] - start[1]
@@ -133,35 +133,33 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
     uy = dy / length
 
     if side == 'left':
-        offset_x = -uy
-        offset_y = ux
+        off_x = -uy
+        off_y = ux
     else:
-        offset_x = uy
-        offset_y = -ux
+        off_x = uy
+        off_y = -ux
 
-    offset_m = safe_radius * 3.0
-    offset_deg = offset_m / 111000.0
+    base_off_deg = safe_radius / 111000.0 * 3.0
 
-    for k in range(1, 15):
-        offset = offset_deg * k
-        p_off = [
-            (start[0] + end[0])/2 + offset_x * offset,
-            (start[1] + end[1])/2 + offset_y * offset
-        ]
-        path = [start.copy(), p_off, end.copy()]
-        ok = True
+    for k in range(1, 18):
+        cur_off = base_off_deg * k
+        mid_x = (start[0] + end[0]) / 2.0 + off_x * cur_off
+        mid_y = (start[1] + end[1]) / 2.0 + off_y * cur_off
+
+        path = [start.copy(), [mid_x, mid_y], end.copy()]
+        blocked = False
         for i in range(len(path)-1):
             if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height, safe_radius):
-                ok = False
+                blocked = True
                 break
-        if ok:
+        if not blocked:
             return path
     return None
 
 # ==================== A* 路径规划（修复报错 + 安全半径生效） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
-    safety = safe_radius / 111000.0 * 1.5  # 安全半径真正生效
+    safety = safe_radius / 111000.0 * 1.5
 
     for obs in obstacles_gcj:
         if not is_obstacle_blocking(obs, flight_height, safe_radius):
@@ -358,7 +356,7 @@ class HeartbeatSimulator:
             self.history.pop()
         return data
 
-# ==================== 创建地图 ====================
+# ==================== 创建地图（保留安全半径蓝色小圆点） ====================
 def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
     if map_type == "satellite":
         tiles = GAODE_SATELLITE_URL
@@ -375,7 +373,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
     )
     m.add_child(draw)
 
-    # ========== 【新增：安全半径 小圆圈可视化】 ==========
+    # 安全半径 浅蓝色小圆圈可视化
     safe_offset = safe_radius / 111000.0
     for obs in obstacles_gcj:
         poly = obs.get('polygon', [])
@@ -397,7 +395,6 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
                     fill_opacity=0.7,
                     popup=f'安全半径 {safe_radius}m'
                 ).add_to(m)
-    # ====================================================
 
     for i, obs in enumerate(obstacles_gcj):
         coords = obs.get('polygon', [])
