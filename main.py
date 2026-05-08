@@ -20,9 +20,11 @@ SCHOOL_CENTER_GCJ = [118.7490, 32.2340]
 DEFAULT_A_GCJ = [118.746956, 32.232945]
 DEFAULT_B_GCJ = [118.751589, 32.235204]
 
-# 【修复】更换稳定可用的高德瓦片地址
+# 【修复】换回稳定的高德瓦片地址，保持GCJ-02坐标完全匹配
 GAODE_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 GAODE_VECTOR_URL = "https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
+# 额外加一个高德卫星瓦片备用
+GAODE_SATELLITE_URL_ALT = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
 
 # ==================== 坐标系转换 ====================
 def gcj02_to_wgs84(lng, lat):
@@ -133,7 +135,7 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
     if L < 1e-7:
         return None
 
-    # 左右方向
+    # 左右方向（和你原来的逻辑完全一致）
     if side == "left":
         nx = -dy / L
         ny = dx / L
@@ -145,7 +147,7 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
     offset_deg = offset_meter / 111000.0
     seg_num = 12
 
-    # 逐级偏移
+    # 逐级偏移，和你原来的重试逻辑完全一致
     for scale in [1, 1.5, 2, 3, 4, 6, 8]:
         off_deg = offset_deg * scale
         middle = []
@@ -157,7 +159,7 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
             olat = clat + ny * off_deg
             middle.append([olng, olat])
 
-        # 关键修复：起点 → 中间偏移段 → 终点
+        # 关键修复：起点 → 中间偏移段 → 终点，保证首尾严格在A/B点
         path = [start] + middle + [end]
 
         # 检测是否通畅
@@ -171,7 +173,7 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
 
     return None
 
-# ==================== A* 路径规划 ====================
+# ==================== A* 路径规划（完全保留你原来的逻辑） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
     safety = safe_radius / 111000.0 * 1.5
@@ -285,7 +287,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
     else:
         return astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
 
-# ==================== 障碍物管理 ====================
+# ==================== 障碍物管理（完全保留你原来的逻辑） ====================
 def save_obstacles_to_cache():
     if 'saved_obstacles' not in st.session_state:
         st.session_state.saved_obstacles = []
@@ -300,7 +302,7 @@ def load_obstacles_from_cache():
     st.success(f"已从缓存加载 {len(st.session_state.obstacles_gcj)} 个障碍物")
     return True
 
-# ==================== 心跳包模拟器 ====================
+# ==================== 心跳包模拟器（完全保留你原来的逻辑） ====================
 class HeartbeatSimulator:
     def __init__(self, start_point_gcj):
         self.history = []
@@ -371,11 +373,12 @@ class HeartbeatSimulator:
             self.history.pop()
         return data
 
-# ==================== 创建地图（安全半径正常显示） ====================
+# ==================== 创建地图（GCJ-02坐标，和高德地图完全匹配） ====================
 def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
+    # 【修复】卫星地图优先用高德，保证和GCJ-02坐标匹配
     if map_type == "satellite":
-        tiles = GAODE_SATELLITE_URL
-        attr = "ESRI World Imagery"
+        tiles = GAODE_SATELLITE_URL_ALT
+        attr = "高德卫星地图"
     else:
         tiles = GAODE_VECTOR_URL
         attr = "高德矢量地图"
@@ -388,7 +391,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
     )
     m.add_child(draw)
 
-    # 安全半径蓝色小圆点（完全保留）
+    # 安全半径蓝色小圆点（完全保留你原来的逻辑）
     safe_offset = safe_radius / 111000.0
     for obs in obstacles_gcj:
         poly = obs.get('polygon', [])
@@ -436,7 +439,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
             folium.PolyLine(trail, color="orange", weight=2, opacity=0.6, popup="历史轨迹").add_to(m)
     return m
 
-# ==================== 主程序 ====================
+# ==================== 主程序（完全保留你原来的逻辑） ====================
 def main():
     st.title("🏫 无人机地面站系统 - 平行偏移绕行")
     st.markdown("---")
@@ -603,7 +606,7 @@ def main():
 
     # ==================== 飞行监控 ====================
     elif page == "📡 飞行监控":
-        st.header("🗺️ 飞行监控 - 实时心跳包")
+        st.header("📡 飞行监控 - 实时心跳包")
         current_time = time.time()
         if st.session_state.simulation_running:
             if current_time - st.session_state.last_hb_time >= 0.2:
