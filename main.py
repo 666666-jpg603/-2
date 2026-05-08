@@ -161,7 +161,7 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
 # ==================== A* 路径规划（修复报错 + 安全半径生效） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
-    safety = safe_radius / 111000.0 * 1.2  # 安全半径转为经纬度单位
+    safety = safe_radius / 111000.0 * 1.5  # 安全半径真正生效
 
     for obs in obstacles_gcj:
         if not is_obstacle_blocking(obs, flight_height, safe_radius):
@@ -170,14 +170,11 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
         if len(poly) < 3:
             continue
         for i, (x, y) in enumerate(poly):
-            # 前一个点
             prev_i = (i - 1) % len(poly)
             prev = poly[prev_i]
-            # 下一个点
             next_i = (i + 1) % len(poly)
             next_p = poly[next_i]
 
-            # 计算法线方向（向外）
             dx1 = -(y - prev[1])
             dy1 = x - prev[0]
             l1 = math.hypot(dx1, dy1)
@@ -199,7 +196,6 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
             nodes.append([nx1, ny1])
             nodes.append([nx2, ny2])
 
-    # 去重节点
     unique_nodes = []
     for n in nodes:
         exists = False
@@ -210,7 +206,6 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
         if not exists:
             unique_nodes.append(n)
 
-    # 构建邻接表
     graph = {i: [] for i in range(len(unique_nodes))}
     for i in range(len(unique_nodes)):
         for j in range(len(unique_nodes)):
@@ -219,7 +214,6 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
             if not is_path_blocked(unique_nodes[i], unique_nodes[j], obstacles_gcj, flight_height, safe_radius):
                 graph[i].append((j, distance(unique_nodes[i], unique_nodes[j])))
 
-    # 找到起点和终点索引
     start_i = -1
     end_i = -1
     for i, n in enumerate(unique_nodes):
@@ -230,7 +224,6 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     if start_i == -1 or end_i == -1:
         return [start, end]
 
-    # A* 主循环
     open_heap = []
     heapq.heappush(open_heap, (0, start_i))
     came_from = {}
@@ -366,7 +359,7 @@ class HeartbeatSimulator:
         return data
 
 # ==================== 创建地图 ====================
-def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True):
+def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
     if map_type == "satellite":
         tiles = GAODE_SATELLITE_URL
         attr = "高德卫星地图"
@@ -381,6 +374,31 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
         edit_options={'edit': True, 'remove': True}
     )
     m.add_child(draw)
+
+    # ========== 【新增：安全半径 小圆圈可视化】 ==========
+    safe_offset = safe_radius / 111000.0
+    for obs in obstacles_gcj:
+        poly = obs.get('polygon', [])
+        if len(poly) < 3:
+            continue
+        for (x, y) in poly:
+            for angle in range(0, 360, 30):
+                rad = math.radians(angle)
+                dx = math.cos(rad) * safe_offset
+                dy = math.sin(rad) * safe_offset
+                cx = x + dx
+                cy = y + dy
+                folium.CircleMarker(
+                    location=[cy, cx],
+                    radius=1.8,
+                    color='#00ccff',
+                    fill=True,
+                    fill_color='#00ccff',
+                    fill_opacity=0.7,
+                    popup=f'安全半径 {safe_radius}m'
+                ).add_to(m)
+    # ====================================================
+
     for i, obs in enumerate(obstacles_gcj):
         coords = obs.get('polygon', [])
         if coords and len(coords) >= 3:
@@ -558,7 +576,7 @@ def main():
                     st.session_state.obstacles_gcj, flight_alt, safe_radius, selected_strategy
                 )
             m = create_planning_map(center, st.session_state.points_gcj, st.session_state.obstacles_gcj,
-                                   st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked)
+                                   st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked, safe_radius)
             output = st_folium(m, width=700, height=550, returned_objects=["last_active_drawing"])
 
             if output and output.get("last_active_drawing"):
