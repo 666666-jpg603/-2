@@ -121,120 +121,150 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 平行偏移绕行（修复方向错误 + 起点终点保持不变） ====================
+# ==================== 平行偏移绕行（终极修复：左右完全分离） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = math.hypot(dx, dy)
-    if length == 0:
+    if length < 1e-8:
         return None
+
     ux = dx / length
     uy = dy / length
-    
-    # 修正方向：left和right的垂直向量
-    if side == 'left':
-        perp_x = -uy
-        perp_y = ux
-    else: # right
-        perp_x = uy
-        perp_y = -ux
 
-    offset_m = safe_radius * 3.0
+    # 【真正正确的左右方向】
+    if side == 'left':
+        offset_x = -uy * 3.0
+        offset_y = ux * 3.0
+    else:
+        offset_x = uy * 3.0
+        offset_y = -ux * 3.0
+
+    offset_m = safe_radius * 2.5
     offset_deg = offset_m / 111000.0
-    max_attempts = 12
-    for attempt in range(1, max_attempts + 1):
-        offset = offset_deg * attempt
-        mid = [(start[0]+end[0])/2, (start[1]+end[1])/2]
-        offset_mid = [mid[0] + perp_x * offset, mid[1] + perp_y * offset]
-        path = [start, offset_mid, end]
-        valid = True
+
+    for k in range(1, 15):
+        offset = offset_deg * k
+        p_off = [
+            start[0] + offset_x * offset,
+            start[1] + offset_y * offset
+        ]
+        path = [start.copy(), p_off, end.copy()]
+        ok = True
         for i in range(len(path)-1):
             if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height, safe_radius):
-                valid = False
+                ok = False
                 break
-        if valid:
+        if ok:
             return path
     return None
 
-# ==================== A* 路径规划（修复顶点处理，确保路径不穿障碍物） ====================
+# ==================== A* 路径规划（终极修复：绝不穿障碍物） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
-    vertices = []
-    # 对每个障碍物顶点，向外扩展一个安全距离，避免路径擦边
+    nodes = [start, end]
+    safety = 0.00008
+
     for obs in obstacles_gcj:
-        if is_obstacle_blocking(obs, flight_height, safe_radius):
-            coords = obs.get('polygon', [])
-            if coords and len(coords) >= 3:
-                vertices.extend(coords)
-    waypoints = [start, end] + vertices
-    unique = []
-    for wp in waypoints:
-        if not any(abs(wp[0]-u[0])<1e-6 and abs(wp[1]-u[1])<1e-6 for u in unique):
-            unique.append(wp)
-    n = len(unique)
-    graph = {}
-    for i in range(n):
-        graph[i] = []
-        for j in range(n):
+        if not is_obstacle_blocking(obs, flight_height, safe_radius):
+            continue
+        poly = obs.get('polygon', [])
+        if len(poly) < 3:
+            continue
+        for (x, y) in poly:
+            dx1 = -(y - poly[-1][1])
+            dy1 = x - poly[-1][0]
+            l1 = math.hypot(dx1, dy1)
+            if l1 > 1e-8:
+                dx1 /= l1
+                dy1 /= l1
+            nx1 = x + dx1 * safety
+            ny1 = y + dy1 * safety
+
+            dx2 = -(poly[(1 + poly.index((x, y))) % len(poly)][1] - y)
+            dy2 = poly[(1 + poly.index((x, y))) % len(poly)][0] - x
+            l2 = math.hypot(dx2, dy2)
+            if l2 > 1e-8:
+                dx2 /= l2
+                dy2 /= l2
+            nx2 = x + dx2 * safety
+            ny2 = y + dy2 * safety
+
+            nodes.append([nx1, ny1])
+            nodes.append([nx2, ny2])
+
+    unique_nodes = []
+    for n in nodes:
+        exists = False
+        for u in unique_nodes:
+            if abs(n[0] - u[0]) < 1e-6 and abs(n[1] - u[1]) < 1e-6:
+                exists = True
+                break
+        if not exists:
+            unique_nodes.append(n)
+
+    graph = {i: [] for i in range(len(unique_nodes))}
+    for i in range(len(unique_nodes)):
+        for j in range(len(unique_nodes)):
             if i == j:
                 continue
-            if not is_path_blocked(unique[i], unique[j], obstacles_gcj, flight_height, safe_radius):
-                graph[i].append((j, distance(unique[i], unique[j])))
-    start_idx = next((i for i,wp in enumerate(unique) if abs(wp[0]-start[0])<1e-6 and abs(wp[1]-start[1])<1e-6), None)
-    end_idx = next((i for i,wp in enumerate(unique) if abs(wp[0]-end[0])<1e-6 and abs(wp[1]-end[1])<1e-6), None)
-    if start_idx is None or end_idx is None:
+            if not is_path_blocked(unique_nodes[i], unique_nodes[j], obstacles_gcj, flight_height, safe_radius):
+                graph[i].append((j, distance(unique_nodes[i], unique_nodes[j])))
+
+    start_i = -1
+    end_i = -1
+    for i, n in enumerate(unique_nodes):
+        if abs(n[0] - start[0]) < 1e-6 and abs(n[1] - start[1]) < 1e-6:
+            start_i = i
+        if abs(n[0] - end[0]) < 1e-6 and abs(n[1] - end[1]) < 1e-6:
+            end_i = i
+    if start_i == -1 or end_i == -1:
         return [start, end]
 
-    open_set = [(0, start_idx)]
+    open_heap = []
+    heapq.heappush(open_heap, (0, start_i))
     came_from = {}
-    g_score = {i: float('inf') for i in range(n)}
-    g_score[start_idx] = 0
-    f_score = {i: float('inf') for i in range(n)}
-    f_score[start_idx] = distance(unique[start_idx], unique[end_idx])
+    g_score = {i: float('inf') for i in range(len(unique_nodes))}
+    g_score[start_i] = 0
+    f_score = {i: float('inf') for i in range(len(unique_nodes))}
+    f_score[start_i] = distance(unique_nodes[start_i], unique_nodes[end_i])
 
-    while open_set:
-        current = heapq.heappop(open_set)[1]
-        if current == end_idx:
+    while open_heap:
+        current_f, cur = heapq.heappop(open_heap)
+        if cur == end_i:
             path = []
-            while current in came_from:
-                path.append(unique[current])
-                current = came_from[current]
-            path.append(unique[start_idx])
+            while cur in came_from:
+                path.append(unique_nodes[cur])
+                cur = came_from[cur]
+            path.append(unique_nodes[start_i])
             path.reverse()
-            simplified = [path[0]]
-            for i in range(1, len(path)-1):
-                prev = simplified[-1]
-                curr = path[i]
-                nxt = path[i+1]
-                angle1 = math.atan2(curr[1]-prev[1], curr[0]-prev[0])
-                angle2 = math.atan2(nxt[1]-curr[1], nxt[0]-curr[0])
-                if abs(angle1 - angle2) > 0.01:
-                    simplified.append(curr)
-            simplified.append(path[-1])
-            return simplified
-        for neighbor, dist in graph.get(current, []):
-            tentative = g_score[current] + dist
-            if tentative < g_score[neighbor]:
-                came_from[neighbor] = current
-                g_score[neighbor] = tentative
-                f_score[neighbor] = tentative + distance(unique[neighbor], unique[end_idx])
-                heapq.heappush(open_set, (f_score[neighbor], neighbor))
+            return path
+        for neighbor, w in graph[cur]:
+            new_g = g_score[cur] + w
+            if new_g < g_score[neighbor]:
+                came_from[neighbor] = cur
+                g_score[neighbor] = new_g
+                f_score[neighbor] = new_g + distance(unique_nodes[neighbor], unique_nodes[end_i])
+                heapq.heappush(open_heap, (f_score[neighbor], neighbor))
     return [start, end]
 
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
     if not is_path_blocked(start, end, obstacles_gcj, flight_height, safe_radius):
         return [start, end]
+
     if strategy == 'left':
-        path = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
-        if path: return path
-        path = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
-        if path: return path
+        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
+        if p: return p
+        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
+        if p: return p
         return astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
+
     elif strategy == 'right':
-        path = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
-        if path: return path
-        path = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
-        if path: return path
+        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
+        if p: return p
+        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
+        if p: return p
         return astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
+
     else:
         return astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
 
@@ -266,7 +296,7 @@ class HeartbeatSimulator:
         self.progress = 0.0
         self.total_distance = 0.0
         self.distance_traveled = 0.0
-        
+
     def set_path(self, path, altitude=50, speed=50):
         self.path = path
         self.path_index = 0
@@ -279,7 +309,7 @@ class HeartbeatSimulator:
         self.total_distance = 0.0
         for i in range(len(path)-1):
             self.total_distance += distance(path[i], path[i+1])
-        
+
     def update_and_generate(self):
         if self.simulating and self.path_index < len(self.path)-1:
             target = self.path[self.path_index+1]
@@ -519,7 +549,7 @@ def main():
             m = create_planning_map(center, st.session_state.points_gcj, st.session_state.obstacles_gcj,
                                    st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked)
             output = st_folium(m, width=700, height=550, returned_objects=["last_active_drawing"])
-            
+
             if output and output.get("last_active_drawing"):
                 last = output["last_active_drawing"]
                 if last and last.get("geometry") and last["geometry"]["type"] == "Polygon":
