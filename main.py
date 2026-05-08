@@ -121,7 +121,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 平行偏移绕行 ====================
+# ==================== 平行偏移绕行（已修复：起点终点严格为A、B点） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     dx = end[0] - start[0]
     dy = end[1] - start[1]
@@ -141,10 +141,16 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
     max_attempts = 12
     for attempt in range(1, max_attempts + 1):
         offset = offset_deg * attempt
-        p1 = [start[0] + perp_x * offset, start[1] + perp_y * offset]
-        p2 = [end[0] + perp_x * offset, end[1] + perp_y * offset]
-        if not is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
-            return [p1, p2]
+        mid = [(start[0]+end[0])/2, (start[1]+end[1])/2]
+        offset_mid = [mid[0] + perp_x * offset, mid[1] + perp_y * offset]
+        path = [start, offset_mid, end]
+        valid = True
+        for i in range(len(path)-1):
+            if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height, safe_radius):
+                valid = False
+                break
+        if valid:
+            return path
     return None
 
 # ==================== A* 路径规划 ====================
