@@ -121,7 +121,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 平行偏移绕行（终极修复：左右完全分离） ====================
+# ==================== 平行偏移绕行（已修复：左右完全分离） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     dx = end[0] - start[0]
     dy = end[1] - start[1]
@@ -132,22 +132,21 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
     ux = dx / length
     uy = dy / length
 
-    # 【真正正确的左右方向】
     if side == 'left':
-        offset_x = -uy * 3.0
-        offset_y = ux * 3.0
+        offset_x = -uy
+        offset_y = ux
     else:
-        offset_x = uy * 3.0
-        offset_y = -ux * 3.0
+        offset_x = uy
+        offset_y = -ux
 
-    offset_m = safe_radius * 2.5
+    offset_m = safe_radius * 3.0
     offset_deg = offset_m / 111000.0
 
     for k in range(1, 15):
         offset = offset_deg * k
         p_off = [
-            start[0] + offset_x * offset,
-            start[1] + offset_y * offset
+            (start[0] + end[0])/2 + offset_x * offset,
+            (start[1] + end[1])/2 + offset_y * offset
         ]
         path = [start.copy(), p_off, end.copy()]
         ok = True
@@ -159,10 +158,10 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
             return path
     return None
 
-# ==================== A* 路径规划（终极修复：绝不穿障碍物） ====================
+# ==================== A* 路径规划（修复报错 + 安全半径生效） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
-    safety = 0.00008
+    safety = safe_radius / 111000.0 * 1.2  # 安全半径转为经纬度单位
 
     for obs in obstacles_gcj:
         if not is_obstacle_blocking(obs, flight_height, safe_radius):
@@ -170,9 +169,17 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
         poly = obs.get('polygon', [])
         if len(poly) < 3:
             continue
-        for (x, y) in poly:
-            dx1 = -(y - poly[-1][1])
-            dy1 = x - poly[-1][0]
+        for i, (x, y) in enumerate(poly):
+            # 前一个点
+            prev_i = (i - 1) % len(poly)
+            prev = poly[prev_i]
+            # 下一个点
+            next_i = (i + 1) % len(poly)
+            next_p = poly[next_i]
+
+            # 计算法线方向（向外）
+            dx1 = -(y - prev[1])
+            dy1 = x - prev[0]
             l1 = math.hypot(dx1, dy1)
             if l1 > 1e-8:
                 dx1 /= l1
@@ -180,8 +187,8 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
             nx1 = x + dx1 * safety
             ny1 = y + dy1 * safety
 
-            dx2 = -(poly[(1 + poly.index((x, y))) % len(poly)][1] - y)
-            dy2 = poly[(1 + poly.index((x, y))) % len(poly)][0] - x
+            dx2 = -(next_p[1] - y)
+            dy2 = next_p[0] - x
             l2 = math.hypot(dx2, dy2)
             if l2 > 1e-8:
                 dx2 /= l2
@@ -192,6 +199,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
             nodes.append([nx1, ny1])
             nodes.append([nx2, ny2])
 
+    # 去重节点
     unique_nodes = []
     for n in nodes:
         exists = False
@@ -202,6 +210,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
         if not exists:
             unique_nodes.append(n)
 
+    # 构建邻接表
     graph = {i: [] for i in range(len(unique_nodes))}
     for i in range(len(unique_nodes)):
         for j in range(len(unique_nodes)):
@@ -210,6 +219,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
             if not is_path_blocked(unique_nodes[i], unique_nodes[j], obstacles_gcj, flight_height, safe_radius):
                 graph[i].append((j, distance(unique_nodes[i], unique_nodes[j])))
 
+    # 找到起点和终点索引
     start_i = -1
     end_i = -1
     for i, n in enumerate(unique_nodes):
@@ -220,6 +230,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     if start_i == -1 or end_i == -1:
         return [start, end]
 
+    # A* 主循环
     open_heap = []
     heapq.heappush(open_heap, (0, start_i))
     came_from = {}
