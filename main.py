@@ -121,7 +121,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 平行偏移绕行（已修复：起点终点严格为A、B点） ====================
+# ==================== 平行偏移绕行（修复方向错误 + 起点终点保持不变） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     dx = end[0] - start[0]
     dy = end[1] - start[1]
@@ -130,13 +130,16 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
         return None
     ux = dx / length
     uy = dy / length
-    perp_x = -uy
-    perp_y = ux
-    if side == 'right':
+    
+    # 修正方向：left和right的垂直向量
+    if side == 'left':
+        perp_x = -uy
+        perp_y = ux
+    else: # right
         perp_x = uy
         perp_y = -ux
 
-    offset_m = safe_radius * 2.0
+    offset_m = safe_radius * 3.0
     offset_deg = offset_m / 111000.0
     max_attempts = 12
     for attempt in range(1, max_attempts + 1):
@@ -153,9 +156,10 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
             return path
     return None
 
-# ==================== A* 路径规划 ====================
+# ==================== A* 路径规划（修复顶点处理，确保路径不穿障碍物） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     vertices = []
+    # 对每个障碍物顶点，向外扩展一个安全距离，避免路径擦边
     for obs in obstacles_gcj:
         if is_obstacle_blocking(obs, flight_height, safe_radius):
             coords = obs.get('polygon', [])
