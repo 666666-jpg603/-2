@@ -21,7 +21,7 @@ DEFAULT_A_GCJ = [118.746956, 32.232945]
 DEFAULT_B_GCJ = [118.751589, 32.235204]
 
 GAODE_SATELLITE_URL = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-GAODE_VECTOR_URL = "httpswebrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
+GAODE_VECTOR_URL = "https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
 
 # ==================== 坐标系转换 ====================
 def gcj02_to_wgs84(lng, lat):
@@ -121,42 +121,71 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 平行偏移绕行（彻底修复向右绕行失效） ====================
+# ==================== 【全新重写】平行偏移绕行 彻底修复向右绕行 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = math.hypot(dx, dy)
-    if length < 1e-8:
+    lng1, lat1 = start
+    lng2, lat2 = end
+
+    dx = lng2 - lng1
+    dy = lat2 - lat1
+    L = math.hypot(dx, dy)
+    if L < 1e-7:
         return None
 
-    ux = dx / length
-    uy = dy / length
-
-    if side == 'left':
-        off_x = -uy
-        off_y = ux
+    # 左右法向量
+    if side == "left":
+        nx = -dy / L
+        ny = dx / L
     else:
-        off_x = uy
-        off_y = -ux
+        nx = dy / L
+        ny = -dx / L
 
-    base_off_deg = safe_radius / 111000.0 * 3.0
+    # 基础偏移量
+    offset_meter = safe_radius * 4.0
+    offset_deg = offset_meter / 111000.0
 
-    for k in range(1, 18):
-        cur_off = base_off_deg * k
-        mid_x = (start[0] + end[0]) / 2.0 + off_x * cur_off
-        mid_y = (start[1] + end[1]) / 2.0 + off_y * cur_off
+    seg_num = 12
+    # 第一次尝试基础偏移
+    path_points = []
+    for i in range(seg_num + 1):
+        t = i / seg_num
+        clng = lng1 + dx * t
+        clat = lat1 + dy * t
+        olng = clng + nx * offset_deg
+        olat = clat + ny * offset_deg
+        path_points.append([olng, olat])
 
-        path = [start.copy(), [mid_x, mid_y], end.copy()]
-        blocked = False
-        for i in range(len(path)-1):
-            if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height, safe_radius):
-                blocked = True
+    # 检测是否通畅
+    ok = True
+    for i in range(len(path_points)-1):
+        if is_path_blocked(path_points[i], path_points[i+1], obstacles_gcj, flight_height, safe_radius):
+            ok = False
+            break
+    if ok:
+        return path_points
+
+    # 逐级加大偏移重试
+    for scale in range(2, 8):
+        off_deg = offset_deg * scale
+        tmp_path = []
+        for i in range(seg_num + 1):
+            t = i / seg_num
+            clng = lng1 + dx * t
+            clat = lat1 + dy * t
+            olng = clng + nx * off_deg
+            olat = clat + ny * off_deg
+            tmp_path.append([olng, olat])
+        hit = False
+        for j in range(len(tmp_path)-1):
+            if is_path_blocked(tmp_path[j], tmp_path[j+1], obstacles_gcj, flight_height, safe_radius):
+                hit = True
                 break
-        if not blocked:
-            return path
+        if not hit:
+            return tmp_path
+
     return None
 
-# ==================== A* 路径规划（修复报错 + 安全半径生效） ====================
+# ==================== A* 路径规划 ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
     safety = safe_radius / 111000.0 * 1.5
@@ -408,8 +437,8 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
     if planned_path and len(planned_path) > 1:
         path_locations = [[p[1], p[0]] for p in planned_path]
         folium.PolyLine(path_locations, color="green", weight=5, opacity=0.9, popup="✈️ 智能避障航线").add_to(m)
-        for i, point in enumerate(planned_path[1:-1]):
-            folium.CircleMarker([point[1], point[0]], radius=4, color="green", fill=True, fill_color="white", fill_opacity=0.8, popup=f"航点 {i+1}").add_to(m)
+        for point in planned_path:
+            folium.CircleMarker([point[1], point[0]], radius=3, color="green", fill=True, fill_color="white", fill_opacity=0.8).add_to(m)
     if points_gcj.get('A') and points_gcj.get('B'):
         if not straight_blocked:
             folium.PolyLine([[points_gcj['A'][1], points_gcj['A'][0]], [points_gcj['B'][1], points_gcj['B'][0]]], color="blue", weight=2, opacity=0.5, dash_array='5, 5', popup="直线航线").add_to(m)
