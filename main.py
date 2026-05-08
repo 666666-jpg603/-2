@@ -20,7 +20,8 @@ SCHOOL_CENTER_GCJ = [118.7490, 32.2340]
 DEFAULT_A_GCJ = [118.746956, 32.232945]
 DEFAULT_B_GCJ = [118.751589, 32.235204]
 
-GAODE_SATELLITE_URL = "https://webst01.is.autonavi.com/pastmaptile?style=6&x={x}&y={y}&z={z}"
+# 【修复】更换稳定可用的高德瓦片地址
+GAODE_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 GAODE_VECTOR_URL = "https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
 
 # ==================== 坐标系转换 ====================
@@ -374,7 +375,7 @@ class HeartbeatSimulator:
 def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
     if map_type == "satellite":
         tiles = GAODE_SATELLITE_URL
-        attr = "高德卫星地图"
+        attr = "ESRI World Imagery"
     else:
         tiles = GAODE_VECTOR_URL
         attr = "高德矢量地图"
@@ -602,7 +603,7 @@ def main():
 
     # ==================== 飞行监控 ====================
     elif page == "📡 飞行监控":
-        st.header("📡 飞行监控 - 实时心跳包")
+        st.header("🗺️ 飞行监控 - 实时心跳包")
         current_time = time.time()
         if st.session_state.simulation_running:
             if current_time - st.session_state.last_hb_time >= 0.2:
