@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import copy
 import heapq
+import numpy as np
 
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="无人机地面站系统 - 平行偏移绕行", layout="wide")
@@ -109,25 +110,50 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
-def smooth_path(path, weight=0.3):
-    """路径平滑函数，解决直角拐点问题"""
-    if len(path) <= 2:
-        return path
-    new_path = [path[0]]
-    for i in range(1, len(path)-1):
-        prev = path[i-1]
-        curr = path[i]
-        next_p = path[i+1]
-        avg_x = prev[0] * weight + curr[0] * (1-2*weight) + next_p[0] * weight
-        avg_y = prev[1] * weight + curr[1] * (1-2*weight) + next_p[1] * weight
-        new_path.append([avg_x, avg_y])
-    new_path.append(path[-1])
-    return new_path
+# ==================== 三次B样条路径平滑（极致平滑） ====================
+def catmull_rom_spline(points, num_points=20):
+    """Catmull-Rom 样条曲线，生成极致平滑路径"""
+    if len(points) < 2:
+        return points
+    if len(points) == 2:
+        return [points[0], points[1]]
+    
+    # 扩展首尾控制点，避免端点变形
+    extended = [points[0]] + points + [points[-1]]
+    spline_points = []
+    
+    for i in range(len(extended)-3):
+        p0, p1, p2, p3 = extended[i], extended[i+1], extended[i+2], extended[i+3]
+        for t in np.linspace(0, 1, num_points):
+            t2 = t * t
+            t3 = t2 * t
+            x = 0.5 * (
+                (2 * p1[0]) +
+                (-p0[0] + p2[0]) * t +
+                (2*p0[0] - 5*p1[0] + 4*p2[0] - p3[0]) * t2 +
+                (-p0[0] + 3*p1[0] - 3*p2[0] + p3[0]) * t3
+            )
+            y = 0.5 * (
+                (2 * p1[1]) +
+                (-p0[1] + p2[1]) * t +
+                (2*p0[1] - 5*p1[1] + 4*p2[1] - p3[1]) * t2 +
+                (-p0[1] + 3*p1[1] - 3*p2[1] + p3[1]) * t3
+            )
+            spline_points.append([x, y])
+    # 去除重复点，保留首尾
+    unique_points = []
+    seen = set()
+    for p in spline_points:
+        key = (round(p[0], 8), round(p[1], 8))
+        if key not in seen:
+            seen.add(key)
+            unique_points.append(p)
+    return [points[0]] + unique_points + [points[-1]]
 
-# ==================== 障碍物高度与阻挡判断（修复A*穿越问题） ====================
+# ==================== 障碍物高度与阻挡判断（加强版） ====================
 def is_obstacle_blocking(obs, flight_height, safe_radius):
     obs_height = obs.get('height', 20)
-    # 严格判断：飞行高度 <= 障碍物高度 + 安全半径，就视为阻挡
+    # 严格模式：飞行高度必须 > 障碍物高度 + 安全半径，否则视为阻挡
     return flight_height <= obs_height + safe_radius
 
 def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
@@ -139,7 +165,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 优化后的平行偏移绕行（解决直角拐点+左右策略问题） ====================
+# ==================== 优化后的平行偏移绕行 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     lng1, lat1 = start
     lng2, lat2 = end
@@ -158,9 +184,9 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
         nx = dy / L
         ny = -dx / L
 
-    offset_meter = safe_radius * 5.0  # 加大偏移距离，避免和安全半径冲突
+    offset_meter = safe_radius * 6.0  # 进一步加大偏移距离，避免穿障
     offset_deg = offset_meter / 111000.0
-    seg_num = 15  # 增加路径点，提升平滑度
+    seg_num = 20  # 增加路径点，提升平滑度
 
     # 多级偏移尝试
     for scale in [1, 1.5, 2, 3, 4, 6, 8]:
@@ -174,26 +200,24 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
             olat = clat + ny * off_deg
             middle.append([olng, olat])
 
-        # 生成路径，先不直接连接起点终点，避免直线穿障
         path = [start] + middle + [end]
 
-        # 检测是否通畅
+        # 路径段检测
         ok = True
         for i in range(len(path)-1):
             if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height, safe_radius):
                 ok = False
                 break
         if ok:
-            # 路径平滑处理，消除直角拐点
-            smoothed = smooth_path(path, weight=0.3)
-            return smoothed
+            # 用B样条做极致平滑
+            return catmull_rom_spline(path, num_points=10)
 
     return None
 
-# ==================== 优化后的A*路径规划（解决穿障问题） ====================
+# ==================== 修复穿障的A*路径规划 ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
-    safety = safe_radius / 111000.0 * 1.8  # 放大安全缓冲区
+    safety = safe_radius / 111000.0 * 2.0  # 放大安全缓冲区
 
     for obs in obstacles_gcj:
         if not is_obstacle_blocking(obs, flight_height, safe_radius):
@@ -273,8 +297,8 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 cur = came_from[cur]
             path.append(unique_nodes[start_i])
             path.reverse()
-            # A*路径也做平滑处理
-            return smooth_path(path, weight=0.3)
+            # 用B样条做极致平滑
+            return catmull_rom_spline(path, num_points=10)
         for neighbor, w in graph[cur]:
             new_g = g_score[cur] + w
             if new_g < g_score[neighbor]:
