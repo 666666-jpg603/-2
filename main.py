@@ -406,9 +406,8 @@ class HeartbeatSimulator:
             self.history.pop()
         return data
 
-# ==================== 创建地图（GCJ-02坐标，和高德地图完全匹配 + 安全半径可视化） ====================
+# ==================== 创建地图（已修复 NameError 错误） ====================
 def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
-    # 【修复】卫星地图优先用高德，保证和GCJ-02坐标匹配
     if map_type == "satellite":
         tiles = GAODE_SATELLITE_URL_ALT
         attr = "高德卫星地图"
@@ -424,13 +423,11 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
     )
     m.add_child(draw)
 
-    # 安全半径可视化（和示例要求一致）
     safe_offset = safe_radius / 111000.0
-    for obs in obstacles_gcj:
+    for i, obs in enumerate(obstacles_gcj):
         poly = obs.get('polygon', [])
         if len(poly) < 3:
             continue
-        # 绘制安全距离缓冲区点
         for (x, y) in poly:
             for angle in range(0, 360, 30):
                 rad = math.radians(angle)
@@ -447,7 +444,6 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
                     fill_opacity=0.7,
                     popup=f'安全半径 {safe_radius}m'
                 ).add_to(m)
-        # 绘制障碍物多边形
         coords = obs.get('polygon', [])
         if coords and len(coords) >= 3:
             popup_text = f"🚧 {obs.get('name', f'障碍物{i+1}')}\n高度: {obs.get('height', 20)}m"
@@ -473,7 +469,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
             folium.PolyLine(trail, color="orange", weight=2, opacity=0.6, popup="历史轨迹").add_to(m)
     return m
 
-# ==================== 主程序（完全保留你原来的逻辑 + 新增飞行监控界面） ====================
+# ==================== 主程序 ====================
 def main():
     st.title("🏫 无人机地面站系统 - 平行偏移绕行")
     st.markdown("---")
@@ -638,11 +634,10 @@ def main():
                             st.session_state.pending_polygon = poly
                             st.success("已捕获多边形")
 
-    # ==================== 飞行监控（按示例界面完全实现） ====================
+    # ==================== 飞行监控 ====================
     elif page == "📡 飞行监控":
         st.header("🛸 飞行实时画面 - 任务执行监控")
 
-        # 任务控制按钮
         col_ctrl, col_status = st.columns([3, 1])
         with col_ctrl:
             c1, c2, c3, c4 = st.columns(4)
@@ -670,7 +665,6 @@ def main():
             status = "运行中" if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused else "已暂停"
             st.info(f"状态：{status}")
 
-        # 实时心跳更新
         current_time = time.time()
         if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused:
             if current_time - st.session_state.last_hb_time >= 0.2:
@@ -678,7 +672,6 @@ def main():
                 st.session_state.last_hb_time = current_time
                 st.rerun()
 
-        # 监控数据面板（和示例完全对齐）
         if st.session_state.heartbeat_sim.history:
             latest = st.session_state.heartbeat_sim.history[0]
             col1, col2, col3, col4, col5, col6 = st.columns(6)
@@ -692,7 +685,6 @@ def main():
             st.progress(latest['progress'], text=f"任务进度：{latest['progress']*100:.0f}%")
             st.markdown("---")
 
-            # 地图 + 通信链路面板
             map_col, comm_col = st.columns([2, 1])
             with map_col:
                 st.subheader("实时飞行地图")
