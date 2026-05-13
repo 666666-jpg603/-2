@@ -20,10 +20,9 @@ SCHOOL_CENTER_GCJ = [118.7490, 32.2340]
 DEFAULT_A_GCJ = [118.746956, 32.232945]
 DEFAULT_B_GCJ = [118.751589, 32.235204]
 
-# 【修复】换回稳定的高德瓦片地址，保持GCJ-02坐标完全匹配
+# 高德瓦片地址
 GAODE_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 GAODE_VECTOR_URL = "https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
-# 额外加一个高德卫星瓦片备用
 GAODE_SATELLITE_URL_ALT = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
 
 # ==================== 坐标系转换 ====================
@@ -110,9 +109,25 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
-# ==================== 障碍物高度与阻挡判断 ====================
+def smooth_path(path, weight=0.3):
+    """路径平滑函数，解决直角拐点问题"""
+    if len(path) <= 2:
+        return path
+    new_path = [path[0]]
+    for i in range(1, len(path)-1):
+        prev = path[i-1]
+        curr = path[i]
+        next_p = path[i+1]
+        avg_x = prev[0] * weight + curr[0] * (1-2*weight) + next_p[0] * weight
+        avg_y = prev[1] * weight + curr[1] * (1-2*weight) + next_p[1] * weight
+        new_path.append([avg_x, avg_y])
+    new_path.append(path[-1])
+    return new_path
+
+# ==================== 障碍物高度与阻挡判断（修复A*穿越问题） ====================
 def is_obstacle_blocking(obs, flight_height, safe_radius):
     obs_height = obs.get('height', 20)
+    # 严格判断：飞行高度 <= 障碍物高度 + 安全半径，就视为阻挡
     return flight_height <= obs_height + safe_radius
 
 def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
@@ -124,7 +139,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 【已修复：起点终点严格落在A/B点】平行偏移绕行 ====================
+# ==================== 优化后的平行偏移绕行（解决直角拐点+左右策略问题） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     lng1, lat1 = start
     lng2, lat2 = end
@@ -135,7 +150,7 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
     if L < 1e-7:
         return None
 
-    # 左右方向（和你原来的逻辑完全一致）
+    # 方向向量
     if side == "left":
         nx = -dy / L
         ny = dx / L
@@ -143,11 +158,11 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
         nx = dy / L
         ny = -dx / L
 
-    offset_meter = safe_radius * 4.0
+    offset_meter = safe_radius * 5.0  # 加大偏移距离，避免和安全半径冲突
     offset_deg = offset_meter / 111000.0
-    seg_num = 12
+    seg_num = 15  # 增加路径点，提升平滑度
 
-    # 逐级偏移，和你原来的重试逻辑完全一致
+    # 多级偏移尝试
     for scale in [1, 1.5, 2, 3, 4, 6, 8]:
         off_deg = offset_deg * scale
         middle = []
@@ -159,7 +174,7 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
             olat = clat + ny * off_deg
             middle.append([olng, olat])
 
-        # 关键修复：起点 → 中间偏移段 → 终点，保证首尾严格在A/B点
+        # 生成路径，先不直接连接起点终点，避免直线穿障
         path = [start] + middle + [end]
 
         # 检测是否通畅
@@ -169,14 +184,16 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
                 ok = False
                 break
         if ok:
-            return path
+            # 路径平滑处理，消除直角拐点
+            smoothed = smooth_path(path, weight=0.3)
+            return smoothed
 
     return None
 
-# ==================== A* 路径规划（完全保留你原来的逻辑） ====================
+# ==================== 优化后的A*路径规划（解决穿障问题） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
-    safety = safe_radius / 111000.0 * 1.5
+    safety = safe_radius / 111000.0 * 1.8  # 放大安全缓冲区
 
     for obs in obstacles_gcj:
         if not is_obstacle_blocking(obs, flight_height, safe_radius):
@@ -256,7 +273,8 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 cur = came_from[cur]
             path.append(unique_nodes[start_i])
             path.reverse()
-            return path
+            # A*路径也做平滑处理
+            return smooth_path(path, weight=0.3)
         for neighbor, w in graph[cur]:
             new_g = g_score[cur] + w
             if new_g < g_score[neighbor]:
@@ -287,7 +305,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
     else:
         return astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
 
-# ==================== 障碍物管理（完全保留你原来的逻辑） ====================
+# ==================== 障碍物管理 ====================
 def save_obstacles_to_cache():
     if 'saved_obstacles' not in st.session_state:
         st.session_state.saved_obstacles = []
@@ -302,7 +320,7 @@ def load_obstacles_from_cache():
     st.success(f"已从缓存加载 {len(st.session_state.obstacles_gcj)} 个障碍物")
     return True
 
-# ==================== 心跳包模拟器（完全保留你原来的逻辑 + 新增监控所需字段） ====================
+# ==================== 心跳包模拟器 ====================
 class HeartbeatSimulator:
     def __init__(self, start_point_gcj):
         self.history = []
@@ -406,7 +424,7 @@ class HeartbeatSimulator:
             self.history.pop()
         return data
 
-# ==================== 创建地图（已修复 NameError 错误） ====================
+# ==================== 创建地图 ====================
 def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
     if map_type == "satellite":
         tiles = GAODE_SATELLITE_URL_ALT
