@@ -7,7 +7,7 @@ import time
 import math
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import copy
 import heapq
@@ -302,7 +302,7 @@ def load_obstacles_from_cache():
     st.success(f"已从缓存加载 {len(st.session_state.obstacles_gcj)} 个障碍物")
     return True
 
-# ==================== 心跳包模拟器（完全保留你原来的逻辑） ====================
+# ==================== 心跳包模拟器（完全保留你原来的逻辑 + 新增监控所需字段） ====================
 class HeartbeatSimulator:
     def __init__(self, start_point_gcj):
         self.history = []
@@ -310,11 +310,13 @@ class HeartbeatSimulator:
         self.path = [start_point_gcj.copy()]
         self.path_index = 0
         self.simulating = False
+        self.paused = False
         self.flight_altitude = 50
         self.speed = 50
         self.progress = 0.0
         self.total_distance = 0.0
         self.distance_traveled = 0.0
+        self.start_time = None
 
     def set_path(self, path, altitude=50, speed=50):
         self.path = path
@@ -323,14 +325,34 @@ class HeartbeatSimulator:
         self.flight_altitude = altitude
         self.speed = speed
         self.simulating = True
+        self.paused = False
         self.progress = 0.0
         self.distance_traveled = 0.0
         self.total_distance = 0.0
+        self.start_time = datetime.now()
         for i in range(len(path)-1):
             self.total_distance += distance(path[i], path[i+1])
 
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
+    def stop(self):
+        self.simulating = False
+        self.paused = False
+
+    def reset(self):
+        self.path_index = 0
+        self.current_pos = self.path[0].copy()
+        self.progress = 0.0
+        self.distance_traveled = 0.0
+        self.start_time = None
+        self.history = []
+
     def update_and_generate(self):
-        if self.simulating and self.path_index < len(self.path)-1:
+        if self.simulating and not self.paused and self.path_index < len(self.path)-1:
             target = self.path[self.path_index+1]
             dx = target[0] - self.current_pos[0]
             dy = target[1] - self.current_pos[1]
@@ -354,7 +376,11 @@ class HeartbeatSimulator:
             self.simulating = False
             self.progress = 1.0
         altitude = self.flight_altitude + random.randint(-5,5) if self.simulating else random.randint(0,10)
-        speed_display = round(self.speed * 0.1, 1) if self.simulating else 0
+        speed_display = round(self.speed * 0.1, 1) if self.simulating and not self.paused else 0
+        elapsed_seconds = int((datetime.now() - self.start_time).total_seconds()) if self.start_time else 0
+        remaining_distance = self.total_distance - self.distance_traveled
+        remaining_time = int(remaining_distance / (speed_display * 1000 / 3600)) if speed_display > 0 else 0
+        battery = max(0, round(100 - (elapsed_seconds / 600) * 4, 0)) if self.simulating else 96
         data = {
             "timestamp": datetime.now().strftime("%H:%M:%S"),
             "lng": self.current_pos[0],
@@ -366,14 +392,21 @@ class HeartbeatSimulator:
             "progress": self.progress,
             "distance_traveled": self.distance_traveled,
             "total_distance": self.total_distance,
-            "simulating": self.simulating
+            "simulating": self.simulating,
+            "paused": self.paused,
+            "elapsed_time": elapsed_seconds,
+            "remaining_distance": round(remaining_distance * 111000, 1),
+            "remaining_time": remaining_time,
+            "battery": int(battery),
+            "current_waypoint": self.path_index + 1,
+            "total_waypoints": len(self.path)
         }
         self.history.insert(0, data)
         if len(self.history) > 200:
             self.history.pop()
         return data
 
-# ==================== 创建地图（GCJ-02坐标，和高德地图完全匹配） ====================
+# ==================== 创建地图（GCJ-02坐标，和高德地图完全匹配 + 安全半径可视化） ====================
 def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
     # 【修复】卫星地图优先用高德，保证和GCJ-02坐标匹配
     if map_type == "satellite":
@@ -391,12 +424,13 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
     )
     m.add_child(draw)
 
-    # 安全半径蓝色小圆点（完全保留你原来的逻辑）
+    # 安全半径可视化（和示例要求一致）
     safe_offset = safe_radius / 111000.0
     for obs in obstacles_gcj:
         poly = obs.get('polygon', [])
         if len(poly) < 3:
             continue
+        # 绘制安全距离缓冲区点
         for (x, y) in poly:
             for angle in range(0, 360, 30):
                 rad = math.radians(angle)
@@ -413,12 +447,12 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
                     fill_opacity=0.7,
                     popup=f'安全半径 {safe_radius}m'
                 ).add_to(m)
-
-    for i, obs in enumerate(obstacles_gcj):
+        # 绘制障碍物多边形
         coords = obs.get('polygon', [])
         if coords and len(coords) >= 3:
             popup_text = f"🚧 {obs.get('name', f'障碍物{i+1}')}\n高度: {obs.get('height', 20)}m"
             folium.Polygon([[c[1], c[0]] for c in coords], color="red", weight=3, fill=True, fill_color="red", fill_opacity=0.4, popup=popup_text).add_to(m)
+
     if points_gcj.get('A'):
         folium.Marker([points_gcj['A'][1], points_gcj['A'][0]], popup="🟢 起点", icon=folium.Icon(color="green", icon="play", prefix="fa")).add_to(m)
     if points_gcj.get('B'):
@@ -439,7 +473,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
             folium.PolyLine(trail, color="orange", weight=2, opacity=0.6, popup="历史轨迹").add_to(m)
     return m
 
-# ==================== 主程序（完全保留你原来的逻辑） ====================
+# ==================== 主程序（完全保留你原来的逻辑 + 新增飞行监控界面） ====================
 def main():
     st.title("🏫 无人机地面站系统 - 平行偏移绕行")
     st.markdown("---")
@@ -580,7 +614,7 @@ def main():
             with c2:
                 if st.button("⏹️ 停止飞行", use_container_width=True):
                     st.session_state.simulation_running = False
-                    st.session_state.heartbeat_sim.simulating = False
+                    st.session_state.heartbeat_sim.stop()
 
         with col2:
             st.subheader("🗺️ 规划地图")
@@ -604,26 +638,97 @@ def main():
                             st.session_state.pending_polygon = poly
                             st.success("已捕获多边形")
 
-    # ==================== 飞行监控 ====================
+    # ==================== 飞行监控（按示例界面完全实现） ====================
     elif page == "📡 飞行监控":
-        st.header("📡 飞行监控 - 实时心跳包")
+        st.header("🛸 飞行实时画面 - 任务执行监控")
+
+        # 任务控制按钮
+        col_ctrl, col_status = st.columns([3, 1])
+        with col_ctrl:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                if st.button("开始任务", type="primary", use_container_width=True):
+                    path = st.session_state.planned_path or [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
+                    st.session_state.heartbeat_sim.set_path(path, flight_alt, drone_speed)
+                    st.session_state.simulation_running = True
+                    st.session_state.flight_history = []
+                    st.rerun()
+            with c2:
+                if st.button("暂停", use_container_width=True):
+                    st.session_state.heartbeat_sim.pause()
+            with c3:
+                if st.button("停止", use_container_width=True):
+                    st.session_state.simulation_running = False
+                    st.session_state.heartbeat_sim.stop()
+            with c4:
+                if st.button("重置", use_container_width=True):
+                    st.session_state.heartbeat_sim.reset()
+                    st.session_state.simulation_running = False
+                    st.session_state.flight_history = []
+                    st.rerun()
+        with col_status:
+            status = "运行中" if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused else "已暂停"
+            st.info(f"状态：{status}")
+
+        # 实时心跳更新
         current_time = time.time()
-        if st.session_state.simulation_running:
+        if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused:
             if current_time - st.session_state.last_hb_time >= 0.2:
                 st.session_state.heartbeat_sim.update_and_generate()
                 st.session_state.last_hb_time = current_time
                 st.rerun()
 
+        # 监控数据面板（和示例完全对齐）
         if st.session_state.heartbeat_sim.history:
             latest = st.session_state.heartbeat_sim.history[0]
-            c1,c2,c3,c4,c5,c6 = st.columns(6)
-            c1.metric("⏰ 时间", latest['timestamp'])
-            c2.metric("📍 纬度", f"{latest['lat']:.6f}")
-            c3.metric("📍 经度", f"{latest['lng']:.6f}")
-            c4.metric("📊 高度", f"{latest['altitude']}m")
-            c5.metric("🔋 电压", f"{latest['voltage']}V")
-            c6.metric("🛰️ 卫星", latest['satellites'])
-            st.progress(latest['progress'], text=f"飞行进度：{latest['progress']*100:.1f}%")
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            col1.metric("当前航点", f"{latest['current_waypoint']}/{latest['total_waypoints']}")
+            col2.metric("飞行速度", f"{latest['speed']} m/s")
+            col3.metric("已用时间", f"{timedelta(seconds=latest['elapsed_time'])}")
+            col4.metric("剩余距离", f"{latest['remaining_distance']} m")
+            col5.metric("预计到达", str(timedelta(seconds=latest['remaining_time'])) if latest['remaining_time']>0 else "00:00")
+            col6.metric("电量模拟", f"{latest['battery']}%")
+
+            st.progress(latest['progress'], text=f"任务进度：{latest['progress']*100:.0f}%")
+            st.markdown("---")
+
+            # 地图 + 通信链路面板
+            map_col, comm_col = st.columns([2, 1])
+            with map_col:
+                st.subheader("实时飞行地图")
+                center = st.session_state.points_gcj['A'] or SCHOOL_CENTER_GCJ
+                m = create_planning_map(center, st.session_state.points_gcj, st.session_state.obstacles_gcj,
+                                       st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked, safe_radius)
+                folium_static(m, width=600, height=400)
+            with comm_col:
+                st.subheader("通信链路拓扑与数据流")
+                st.markdown("""
+                <div style="display:flex; justify-content:space-around; text-align:center; margin-top:20px;">
+                    <div style="padding:10px; background:#e3f2fd; border-radius:8px;">
+                        <div style="color:#1976d2;">GCS</div>
+                        <div style="font-size:12px;">地面站</div>
+                        <div style="color:green; font-size:12px;">● 在线</div>
+                    </div>
+                    <div style="padding:10px; background:#e8f5e9; border-radius:8px;">
+                        <div style="color:#388e3c;">OBC</div>
+                        <div style="font-size:12px;">机载计算机</div>
+                        <div style="color:green; font-size:12px;">● 在线</div>
+                    </div>
+                    <div style="padding:10px; background:#fff3e0; border-radius:8px;">
+                        <div style="color:#f57c00;">MAVLink</div>
+                        <div style="font-size:12px;">通信协议</div>
+                        <div style="color:green; font-size:12px;">● 正常</div>
+                    </div>
+                    <div style="padding:10px; background:#fce4ec; border-radius:8px;">
+                        <div style="color:#c2185b;">FCU</div>
+                        <div style="font-size:12px;">飞控单元</div>
+                        <div style="color:green; font-size:12px;">● 在线</div>
+                    </div>
+                </div>
+                <div style="margin-top:20px; font-size:12px; color:#666;">
+                    链路统计：GCS→OBC: 正常 (延迟: 25ms, 丢包率: 0.3%)
+                </div>
+                """, unsafe_allow_html=True)
 
     # ==================== 障碍物管理 ====================
     elif page == "🚧 障碍物管理":
