@@ -183,74 +183,52 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 【重点优化】重构左右绕行：沿障碍物外围圆弧绕行，和A*绕行形态一致 ====================
+# ==================== 【已修复】左右绕行：沿AB法向平行偏移，完美避障 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
-    # 收集所有起阻挡作用的障碍物
-    block_obs_list = []
+    # 筛选真正产生高度阻挡的障碍物
+    block_obstacles = []
     for obs in obstacles_gcj:
         if is_obstacle_blocking(obs, flight_height, safe_radius):
-            block_obs_list.append(obs['polygon'])
-    if not block_obs_list:
+            block_obstacles.append(obs)
+    if not block_obstacles:
         return None
 
-    offset_meter = safe_radius * 10.0
-    off_deg = offset_meter / 111000.0
-    raw_way = [start]
+    # 基础偏移：安全半径放大系数（米）
+    offset_meter = safe_radius * 1.2
+    off_deg = offset_meter / 111000.0  # 转经纬度偏移量
 
-    # 遍历障碍物外轮廓做偏移绕点
-    for poly in block_obs_list:
-        poly_center_lng = sum([p[0] for p in poly]) / len(poly)
-        poly_center_lat = sum([p[1] for p in poly]) / len(poly)
-        dx_c = poly_center_lng - start[0]
-        dy_c = poly_center_lat - start[1]
-        Lc = math.hypot(dx_c, dy_c)
-        if Lc < 1e-8:
-            continue
-        # 左右法向偏移
-        if side == "left":
-            nx = -dy_c / Lc
-            ny = dx_c / Lc
-        else:
-            nx = dy_c / Lc
-            ny = -dx_c / Lc
-        # 障碍物外侧三个绕点，形成圆弧绕行
-        p_mid = [poly_center_lng + nx*off_deg, poly_center_lat + ny*off_deg]
-        p_up = [poly_center_lng + nx*off_deg*1.3 + dx_c/Lc*off_deg*0.6, poly_center_lat + ny*off_deg*1.3 + dy_c/Lc*off_deg*0.6]
-        p_down = [poly_center_lng + nx*off_deg*1.3 - dx_c/Lc*off_deg*0.6, poly_center_lat + ny*off_deg*1.3 - dy_c/Lc*off_deg*0.6]
-        raw_way += [p_down, p_mid, p_up]
-    raw_way.append(end)
+    # AB线段方向向量 + 法向（左/右）
+    ab_dx = end[0] - start[0]
+    ab_dy = end[1] - start[1]
+    ab_len = math.hypot(ab_dx, ab_dy)
+    if ab_len < 1e-8:
+        return None
 
-    # 逐级放大偏移重试
-    for scale in [1,1.3,1.8,2.5,3.5]:
-        test_path = []
-        for idx in range(len(raw_way)-1):
-            s_p = raw_way[idx]
-            e_p = raw_way[idx+1]
-            seg_dx = e_p[0]-s_p[0]
-            seg_dy = e_p[1]-s_p[1]
-            seg_L = math.hypot(seg_dx, seg_dy)
-            if seg_L <1e-7:
-                test_path.append(s_p)
-                continue
-            if side == "left":
-                snx = -seg_dy/seg_L
-                sny = seg_dx/seg_L
-            else:
-                snx = seg_dy/seg_L
-                sny = -seg_dx/seg_L
-            mid_off = [(s_p[0]+e_p[0])/2 + snx*off_deg*scale, (s_p[1]+e_p[1])/2 + sny*off_deg*scale]
-            test_path += [s_p, mid_off]
-        test_path.append(end)
-        # 路径碰撞检测
-        path_ok = True
-        for i in range(len(test_path)-1):
-            if is_path_blocked(test_path[i], test_path[i+1], obstacles_gcj, flight_height, safe_radius):
-                path_ok = False
-                break
-        if path_ok:
-            spline_p = catmull_rom_spline(test_path, num_points=5)
-            final_p = simplify_path_by_distance(spline_p)
-            return final_p
+    # 单位法向量：左/右
+    if side == 'left':
+        nx = -ab_dy / ab_len
+        ny = ab_dx / ab_len
+    else:
+        nx = ab_dy / ab_len
+        ny = -ab_dx / ab_len
+
+    # 逐级放大偏移，直到整条路径不穿任何障碍物
+    for scale in [1.0, 1.5, 2.0, 2.8, 3.6, 4.5, 6.0]:
+        test_path = [
+            [start[0] + nx * off_deg * scale, start[1] + ny * off_deg * scale],
+            [end[0] + nx * off_deg * scale, end[1] + ny * off_deg * scale]
+        ]
+        # 检测整段是否安全
+        valid = True
+        if is_path_blocked(test_path[0], test_path[1], block_obstacles, flight_height, safe_radius):
+            valid = False
+        if valid:
+            # 平滑 + 抽稀
+            smooth = catmull_rom_spline(test_path, num_points=5)
+            final = simplify_path_by_distance(smooth, min_dist_deg=0.0003)
+            return final
+
+    # 放大仍失败 → 返回None，自动切A*
     return None
 
 # ==================== A*路径规划（备用） ====================
