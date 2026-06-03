@@ -179,115 +179,140 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
                     return True
     return False
 
-# ==================== 【完美优化】左右绕行：障碍物外轮廓圆弧绕行 ====================
+# ==================== 【修复版】多边形外扩绕行算法：沿障碍物侧边左右绕行，不穿建筑 ====================
+def offset_polygon(poly, offset_deg, side):
+    """多边形整体向内/外偏移，side:left=左法向外扩，right=右法向外扩"""
+    new_poly = []
+    n = len(poly)
+    for i in range(n):
+        p = poly[i]
+        p_prev = poly[(i-1)%n]
+        p_next = poly[(i+1)%n]
+        # 两条边向量
+        e1 = [p[0]-p_prev[0], p[1]-p_prev[1]]
+        e2 = [p_next[0]-p[0], p_next[1]-p[1]]
+        # 单位法向量
+        len1 = math.hypot(e1[0], e1[1])
+        len2 = math.hypot(e2[0], e2[1])
+        if len1<1e-8 or len2<1e-8:
+            new_poly.append(p)
+            continue
+        if side == 'left':
+            n1 = [-e1[1]/len1, e1[0]/len1]
+            n2 = [-e2[1]/len2, e2[0]/len2]
+        else:
+            n1 = [e1[1]/len1, -e1[0]/len1]
+            n2 = [e2[1]/len2, -e2[0]/len2]
+        # 角平分线
+        nm = [n1[0]+n2[0], n1[1]+n2[1]]
+        nm_len = math.hypot(nm[0], nm[1])
+        if nm_len <1e-8:
+            off_p = [p[0]+n1[0]*offset_deg, p[1]+n1[1]*offset_deg]
+        else:
+            off_p = [p[0]+nm[0]/nm_len*offset_deg, p[1]+nm[1]/nm_len*offset_deg]
+        new_poly.append(off_p)
+    return new_poly
+
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     # 筛选：仅高度高于飞行高度的障碍物需要绕行
     block_obstacles = []
     for obs in obstacles_gcj:
         if is_obstacle_blocking(obs, flight_height):
             block_obstacles.append(obs)
-    
     if not block_obstacles:
         return None
 
-    # 安全偏移距离（米转经纬度）
-    safe_offset = safe_radius / 111000.0
-    path_waypoints = [start]
+    offset_deg = safe_radius / 111000.0
+    final_route = [start]
 
-    # 遍历每个障碍物，生成外切圆弧绕行点
     for obs in block_obstacles:
-        polygon = obs['polygon']
-        if len(polygon) < 3:
+        raw_poly = obs['polygon']
+        if len(raw_poly)<3:
             continue
-        
-        # 计算障碍物中心点
-        center_lng = sum(p[0] for p in polygon) / len(polygon)
-        center_lat = sum(p[1] for p in polygon) / len(polygon)
-        center = [center_lng, center_lat]
-
-        # 计算起点->障碍物中心的方向向量
-        dir_lng = center_lng - start[0]
-        dir_lat = center_lat - start[1]
-        dir_len = math.hypot(dir_lng, dir_lat)
-        if dir_len < 1e-8:
-            continue
-        
-        # 归一化方向向量
-        dir_lng /= dir_len
-        dir_lat /= dir_len
-
-        # 计算左右法向（垂直于飞行方向）
-        if side == 'left':
-            normal_lng = -dir_lat
-            normal_lat = dir_lng
+        # 障碍物外扩安全缓冲区轮廓
+        outer_poly = offset_polygon(raw_poly, offset_deg, side)
+        # 找起点→终点连线和障碍物的入点、出点
+        cross_in = None
+        cross_out = None
+        line_seg = [start, end]
+        poly_n = len(outer_poly)
+        # 查找进出多边形的两个交点
+        cross_points = []
+        for i in range(poly_n):
+            pa = outer_poly[i]
+            pb = outer_poly[(i+1)%poly_n]
+            if segments_intersect(line_seg[0], line_seg[1], pa, pb):
+                # 简易取边中点作为绕行切入点
+                cross_points.append([(pa[0]+pb[0])/2, (pa[1]+pb[1])/2])
+        if len(cross_points)>=2:
+            cross_in = cross_points[0]
+            cross_out = cross_points[-1]
         else:
-            normal_lng = dir_lat
-            normal_lat = -dir_lng
+            # 无交点则跳过该障碍物
+            continue
 
-        # 生成3个绕行点，形成完美圆弧（完全在障碍物外侧）
-        offset_multiplier = 2.0  # 偏移倍数，确保远离障碍物
-        bypass_point1 = [
-            center_lng + normal_lng * safe_offset * offset_multiplier - dir_lng * safe_offset,
-            center_lat + normal_lat * safe_offset * offset_multiplier - dir_lat * safe_offset
-        ]
-        bypass_point2 = [
-            center_lng + normal_lng * safe_offset * offset_multiplier,
-            center_lat + normal_lat * safe_offset * offset_multiplier
-        ]
-        bypass_point3 = [
-            center_lng + normal_lng * safe_offset * offset_multiplier + dir_lng * safe_offset,
-            center_lat + normal_lat * safe_offset * offset_multiplier + dir_lat * safe_offset
-        ]
+        # 沿外轮廓从入点走到出点
+        idx_in = min(range(poly_n), key=lambda x:distance(outer_poly[x], cross_in))
+        idx_out = min(range(poly_n), key=lambda x:distance(outer_poly[x], cross_out))
+        bypass_segment = []
+        if idx_in <= idx_out:
+            bypass_segment = outer_poly[idx_in:idx_out+1]
+        else:
+            bypass_segment = outer_poly[idx_in:] + outer_poly[:idx_out+1]
+        # 拼接绕行段
+        final_route.append(cross_in)
+        final_route.extend(bypass_segment)
+        final_route.append(cross_out)
 
-        path_waypoints.extend([bypass_point1, bypass_point2, bypass_point3])
+    final_route.append(end)
 
-    path_waypoints.append(end)
-
-    # 路径验证：确保绕行路径不碰撞障碍物
-    for attempt in range(5):
-        valid = True
-        for i in range(len(path_waypoints)-1):
-            if is_path_blocked(path_waypoints[i], path_waypoints[i+1], obstacles_gcj, flight_height):
-                valid = False
-                break
-        
-        if valid:
-            break
-        
-        # 无效则增大偏移重试
-        safe_offset *= 1.3
-        path_waypoints = [start]
+    # 逐级放大偏移重试，直到路径无碰撞
+    test_scale = [1.0,1.3,1.8,2.2,3.0]
+    for scale in test_scale:
+        temp_offset = offset_deg * scale
+        temp_route = [start]
+        valid_flag = True
         for obs in block_obstacles:
-            polygon = obs['polygon']
-            center_lng = sum(p[0] for p in polygon) / len(polygon)
-            center_lat = sum(p[1] for p in polygon) / len(polygon)
-            dir_lng = center_lng - start[0]
-            dir_lat = center_lat - start[1]
-            dir_len = math.hypot(dir_lng, dir_lat)
-            if dir_len < 1e-8:
+            raw_poly = obs['polygon']
+            if len(raw_poly)<3:
                 continue
-            dir_lng /= dir_len
-            dir_lat /= dir_len
-            
-            if side == 'left':
-                normal_lng = -dir_lat
-                normal_lat = dir_lng
+            outer_poly = offset_polygon(raw_poly, temp_offset, side)
+            cross_points = []
+            poly_n = len(outer_poly)
+            for i in range(poly_n):
+                pa = outer_poly[i]
+                pb = outer_poly[(i+1)%poly_n]
+                if segments_intersect(start, end, pa, pb):
+                    cross_points.append([(pa[0]+pb[0])/2, (pa[1]+pb[1])/2])
+            if len(cross_points)<2:
+                continue
+            cin,cout = cross_points[0], cross_points[-1]
+            idx_in = min(range(poly_n), key=lambda x:distance(outer_poly[x], cin))
+            idx_out = min(range(poly_n), key=lambda x:distance(outer_poly[x], cout))
+            if idx_in <= idx_out:
+                seg = outer_poly[idx_in:idx_out+1]
             else:
-                normal_lng = dir_lat
-                normal_lat = -dir_lng
-            
-            bp1 = [center_lng + normal_lng*safe_offset*2 - dir_lng*safe_offset, center_lat + normal_lat*safe_offset*2 - dir_lat*safe_offset]
-            bp2 = [center_lng + normal_lng*safe_offset*2, center_lat + normal_lat*safe_offset*2]
-            bp3 = [center_lng + normal_lng*safe_offset*2 + dir_lng*safe_offset, center_lat + normal_lat*safe_offset*2 + dir_lat*safe_offset]
-            path_waypoints.extend([bp1, bp2, bp3])
-        path_waypoints.append(end)
+                seg = outer_poly[idx_in:]+outer_poly[:idx_out+1]
+            temp_route.append(cin)
+            temp_route.extend(seg)
+            temp_route.append(cout)
+        temp_route.append(end)
+        # 碰撞校验
+        crash = False
+        for s in range(len(temp_route)-1):
+            if is_path_blocked(temp_route[s], temp_route[s+1], obstacles_gcj, flight_height):
+                crash=True
+                break
+        if not crash:
+            final_route = temp_route
+            break
 
-    # 平滑+抽稀
-    smooth_path = catmull_rom_spline(path_waypoints, num_points=5)
+    # 平滑+抽稀输出最终路径
+    smooth_path = catmull_rom_spline(final_route, num_points=5)
     final_path = simplify_path_by_distance(smooth_path)
     return final_path
 
-# ==================== A*路径规划（备用） ====================
+# ==================== A*路径规划（备用，原逻辑不变） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
     safety = safe_radius / 111000.0 * 2.0
@@ -382,7 +407,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 heapq.heappush(open_heap, (f_score[neighbor], neighbor))
     return simplify_path_by_distance([start, end])
 
-# ==================== 路径规划主函数 ====================
+# ==================== 路径规划主函数（原逻辑不变） ====================
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
     if not is_path_blocked(start, end, obstacles_gcj, flight_height):
         path = simplify_path_by_distance([start, end])
@@ -428,7 +453,7 @@ def add_fcu_obc_gcs_log(msg):
     t_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     st.session_state.fcu2gcs_log.append(f"[{t_str}] {msg}")
 
-# ==================== 障碍物管理 ====================
+# ==================== 障碍物管理（原代码不动） ====================
 def save_obstacles_to_cache():
     if 'saved_obstacles' not in st.session_state:
         st.session_state.saved_obstacles = []
@@ -443,7 +468,7 @@ def load_obstacles_from_cache():
     st.success(f"已从缓存加载 {len(st.session_state.obstacles_gcj)} 个障碍物")
     return True
 
-# ==================== 心跳包模拟器【新增航点抵达日志】 ====================
+# ==================== 心跳包模拟器（原代码不动） ====================
 class HeartbeatSimulator:
     def __init__(self, start_point_gcj):
         self.history = []
@@ -560,7 +585,7 @@ class HeartbeatSimulator:
             self.history.pop()
         return data
 
-# ==================== 创建地图 ====================
+# ==================== 创建地图（原代码不动） ====================
 def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=None, planned_path=None, map_type="satellite", straight_blocked=True, safe_radius=5):
     if map_type == "satellite":
         tiles = GAODE_SATELLITE_URL_ALT
@@ -623,7 +648,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
             folium.PolyLine(trail, color="orange", weight=2, opacity=0.6, popup="历史轨迹").add_to(m)
     return m
 
-# ==================== 主程序 ====================
+# ==================== 主程序（全部原有逻辑保留） ====================
 def main():
     init_comm_log()
     st.title("🏫 无人机地面站系统 - 平行偏移绕行")
@@ -886,7 +911,7 @@ def main():
                 with tab1:
                     log_text1 = ""
                     if len(st.session_state.gcs2fcu_log) ==0:
-                        log_text1 = "暂无航线下发日志\n点击重新规划生成航线即可生成日志"
+                        log_text1 = "暂无航线下发日志\n点击重新规划生成日志"
                     else:
                         for line in st.session_state.gcs2fcu_log[-30:]:
                             log_text1 += line + "\n"
@@ -894,7 +919,7 @@ def main():
                 with tab2:
                     log_text2 = ""
                     if len(st.session_state.fcu2gcs_log) ==0:
-                        log_text2 = "暂无飞控回传日志\n启动飞机飞行后自动生成航点抵达日志"
+                        log_text2 = "暂无飞控回传日志\n启动飞机飞行生成抵达日志"
                     else:
                         for line in st.session_state.fcu2gcs_log[-30:]:
                             log_text2 += line + "\n"
