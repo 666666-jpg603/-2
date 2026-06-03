@@ -110,39 +110,6 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
-# 线段求交点
-def seg_intersection(seg1_s, seg1_e, seg2_s, seg2_e):
-    x1,y1 = seg1_s
-    x2,y2 = seg1_e
-    x3,y3 = seg2_s
-    x4,y4 = seg2_e
-    den = (x1-x2)*(y3-y4)-(y1-y2)*(x3-x4)
-    if abs(den)<1e-12:
-        return None
-    t_num = (x1-x3)*(y3-y4)-(y1-y3)*(x3-x4)
-    u_num = -((x1-x2)*(y1-y3)-(y1-y2)*(x1-x3))
-    t = t_num/den
-    u = u_num/den
-    if 0<=t<=1 and 0<=u<=1:
-        x = x1 + t*(x2-x1)
-        y = y1 + t*(y2-y1)
-        return [x,y]
-    return None
-
-def get_polygon_centroid(polygon):
-    """计算多边形中心点"""
-    x = sum(p[0] for p in polygon) / len(polygon)
-    y = sum(p[1] for p in polygon) / len(polygon)
-    return [x, y]
-
-def get_bounding_box(polygon):
-    """获取多边形边界框"""
-    min_x = min(p[0] for p in polygon)
-    max_x = max(p[0] for p in polygon)
-    min_y = min(p[1] for p in polygon)
-    max_y = max(p[1] for p in polygon)
-    return [min_x, max_x, min_y, max_y]
-
 # ===== 航点距离抽稀函数 =====
 def simplify_path_by_distance(points, min_dist_deg=0.0003):
     """按经纬度距离抽稀航线，小于阈值的航点剔除，保留首尾和拐点"""
@@ -199,7 +166,6 @@ def catmull_rom_spline(points, num_points=6):
 
 # ==================== 障碍物高度与阻挡判断 ====================
 def is_obstacle_blocking(obs, flight_height):
-    # 核心：障碍物高度 > 飞行高度 才需要绕行
     obs_height = obs.get('height', 20)
     return flight_height < obs_height
 
@@ -212,132 +178,116 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
                     return True
     return False
 
-# ==================== 可靠的单侧绕行路径生成 ====================
-def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
+# ==================== 单侧绕行路径生成（简化版） ====================
+def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     """
     生成左绕行或右绕行路径
     side: 'left' 或 'right'
+    原理：在起点和终点之间添加一个偏移控制点，让路径从障碍物左侧或右侧绕过
     """
-    # 获取需要绕行的障碍物（高度大于飞行高度的）
+    # 获取需要绕行的障碍物
     block_obs = [obs for obs in obstacles_gcj if is_obstacle_blocking(obs, flight_height)]
     if not block_obs:
         return None
     
-    # 安全半径转换为度数（约111km/度）
+    # 安全半径转换为度数
     safe_radius_deg = safe_radius / 111000.0
     
-    # 尝试不同的偏移距离倍数
-    offset_scales = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0]
+    # 计算起点到终点的方向
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-10:
+        return None
     
-    for scale in offset_scales:
-        current_offset = safe_radius_deg * scale
+    # 单位方向向量
+    ux = dx / length
+    uy = dy / length
+    
+    # 垂直向量（根据左右选择方向）
+    if side == 'left':
+        # 左绕行：垂直向量向左（逆时针旋转90度）
+        perp_x = -uy
+        perp_y = ux
+    else:
+        # 右绕行：垂直向量向右（顺时针旋转90度）
+        perp_x = uy
+        perp_y = -ux
+    
+    # 计算所有阻挡障碍物的中心点
+    all_centers = []
+    for obs in block_obs:
+        poly = obs["polygon"]
+        if len(poly) >= 3:
+            cx = sum(p[0] for p in poly) / len(poly)
+            cy = sum(p[1] for p in poly) / len(poly)
+            all_centers.append([cx, cy])
+    
+    if not all_centers:
+        return None
+    
+    # 计算所有障碍物的平均中心
+    avg_cx = sum(c[0] for c in all_centers) / len(all_centers)
+    avg_cy = sum(c[1] for c in all_centers) / len(all_centers)
+    
+    # 计算偏移距离（根据安全半径和障碍物大小调整）
+    # 获取最远障碍物的距离
+    max_dist_to_center = 0
+    for obs in block_obs:
+        poly = obs["polygon"]
+        for p in poly:
+            dist = distance([avg_cx, avg_cy], p)
+            if dist > max_dist_to_center:
+                max_dist_to_center = dist
+    
+    # 偏移距离 = 障碍物半径 + 安全半径的倍数
+    offset_distance = max_dist_to_center + safe_radius_deg * 3
+    
+    # 生成偏移点
+    offset_point = [
+        avg_cx + perp_x * offset_distance,
+        avg_cy + perp_y * offset_distance
+    ]
+    
+    # 构建路径：起点 -> 偏移点 -> 终点
+    path = [start, offset_point, end]
+    
+    # 碰撞检测
+    collision = False
+    for i in range(len(path) - 1):
+        if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height):
+            collision = True
+            break
+    
+    if not collision:
+        # 平滑路径
+        smoothed = catmull_rom_spline(path, num_points=8)
+        final_path = simplify_path_by_distance(smoothed)
+        return final_path
+    
+    # 如果失败，尝试更大的偏移距离
+    for scale in [4, 5, 6, 7, 8, 10]:
+        offset_distance = max_dist_to_center + safe_radius_deg * scale
+        offset_point = [
+            avg_cx + perp_x * offset_distance,
+            avg_cy + perp_y * offset_distance
+        ]
+        path = [start, offset_point, end]
         
-        # 构建绕行路径
-        full_path = [start]
-        
-        # 计算起点到终点的方向向量
-        dir_dx = end[0] - start[0]
-        dir_dy = end[1] - start[1]
-        dir_length = math.hypot(dir_dx, dir_dy)
-        if dir_length > 0:
-            dir_dx /= dir_length
-            dir_dy /= dir_length
-        
-        # 根据绕行方向计算垂直方向
-        if side == 'left':
-            perp_dx = -dir_dy
-            perp_dy = dir_dx
-        else:
-            perp_dx = dir_dy
-            perp_dy = -dir_dx
-        
-        # 收集所有需要绕行的障碍物偏移点
-        all_offset_points = []
-        
-        for obs in block_obs:
-            poly = obs["polygon"]
-            if len(poly) < 3:
-                continue
-            
-            # 获取障碍物的边界框和中心
-            bbox = get_bounding_box(poly)
-            centroid = get_polygon_centroid(poly)
-            
-            # 计算从起点到终点的直线与障碍物的交点
-            intersect_points = []
-            n = len(poly)
-            for i in range(n):
-                p1 = poly[i]
-                p2 = poly[(i+1)%n]
-                inter = seg_intersection(start, end, p1, p2)
-                if inter:
-                    intersect_points.append(inter)
-            
-            if len(intersect_points) >= 2:
-                # 按距离起点排序
-                intersect_points.sort(key=lambda p: distance(start, p))
-                entry_region = intersect_points[0]
-                exit_region = intersect_points[-1]
-            else:
-                # 如果没有交点，使用多边形上离起点和终点最近的点
-                entry_region = min(poly, key=lambda p: distance(start, p))
-                exit_region = min(poly, key=lambda p: distance(end, p))
-            
-            # 生成偏移点（在垂直方向上偏移）
-            entry_offset = [
-                entry_region[0] + perp_dx * current_offset,
-                entry_region[1] + perp_dy * current_offset
-            ]
-            
-            exit_offset = [
-                exit_region[0] + perp_dx * current_offset,
-                exit_region[1] + perp_dy * current_offset
-            ]
-            
-            # 添加中间点使路径更平滑
-            mid_offset = [
-                (entry_offset[0] + exit_offset[0]) / 2 + perp_dx * current_offset * 0.3,
-                (entry_offset[1] + exit_offset[1]) / 2 + perp_dy * current_offset * 0.3
-            ]
-            
-            all_offset_points.append(entry_offset)
-            all_offset_points.append(mid_offset)
-            all_offset_points.append(exit_offset)
-        
-        # 去重并排序（按路径方向）
-        if all_offset_points:
-            # 按距离起点的距离排序
-            all_offset_points.sort(key=lambda p: distance(start, p))
-            
-            # 去重
-            unique_points = []
-            for p in all_offset_points:
-                if not unique_points or distance(unique_points[-1], p) > 1e-8:
-                    unique_points.append(p)
-            
-            # 添加到完整路径
-            full_path.extend(unique_points)
-        
-        # 添加终点
-        if distance(full_path[-1], end) > 1e-8:
-            full_path.append(end)
-        
-        # 碰撞检测
         collision = False
-        for i in range(len(full_path) - 1):
-            if is_path_blocked(full_path[i], full_path[i+1], obstacles_gcj, flight_height):
+        for i in range(len(path) - 1):
+            if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height):
                 collision = True
                 break
         
-        if not collision and len(full_path) >= 2:
-            # 平滑路径
-            smoothed = catmull_rom_spline(full_path, num_points=6)
+        if not collision:
+            smoothed = catmull_rom_spline(path, num_points=8)
             final_path = simplify_path_by_distance(smoothed)
             return final_path
     
     return None
 
-# ==================== A*路径规划（备用） ====================
+# ==================== A*路径规划 ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
     safety = safe_radius / 111000.0 * 2.0
@@ -445,7 +395,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
     # 直线被阻挡，根据策略选择绕行方式
     if strategy == 'left':
         add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向左绕行 | 飞行高度:{flight_height}m")
-        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
+        p = generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
         if p and len(p) >= 2:
             path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]), 1)
             add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向左绕行成功 | 航点数:{len(p)} | 路径长度:{path_length}m")
@@ -458,7 +408,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
             return ast_p
     elif strategy == 'right':
         add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向右绕行 | 飞行高度:{flight_height}m")
-        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
+        p = generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
         if p and len(p) >= 2:
             path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]), 1)
             add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向右绕行成功 | 航点数:{len(p)} | 路径长度:{path_length}m")
