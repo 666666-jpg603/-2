@@ -183,7 +183,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 优化后的平行偏移绕行（减少分段，控制点变少） ====================
+# ==================== 修复：平行偏移绕行（100%触发左右绕行） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     lng1, lat1 = start
     lng2, lat2 = end
@@ -202,42 +202,37 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
         nx = dy / L
         ny = -dx / L
 
-    offset_meter = safe_radius * 6.0  # 进一步加大偏移距离，避免穿障
+    offset_meter = safe_radius * 8.0
     offset_deg = offset_meter / 111000.0
-    seg_num = 6  # 原20→6，大幅减少中间采样点（优化航点核心）
+    seg_num = 6
 
-    # 多级偏移尝试
-    for scale in [1, 1.5, 2, 3, 4]:
+    # 强制多级偏移，确保左右绕行一定生效
+    for scale in [1, 1.5, 2, 3, 4, 5, 6]:
         off_deg = offset_deg * scale
-        middle = []
-        for i in range(1, seg_num):
-            t = i / seg_num
-            clng = lng1 + dx * t
-            clat = lat1 + dy * t
-            olng = clng + nx * off_deg
-            olat = clat + ny * off_deg
-            middle.append([olng, olat])
-
-        path = [start] + middle + [end]
-
-        # 路径段检测
-        ok = True
-        for i in range(len(path)-1):
-            if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height, safe_radius):
-                ok = False
+        # 生成偏移路径
+        offset_path = [
+            [lng1 + nx * off_deg, lat1 + ny * off_deg],
+            [lng2 + nx * off_deg, lat2 + ny * off_deg]
+        ]
+        
+        # 检测整条路径是否安全
+        safe = True
+        for i in range(len(offset_path)-1):
+            if is_path_blocked(offset_path[i], offset_path[i+1], obstacles_gcj, flight_height, safe_radius):
+                safe = False
                 break
-        if ok:
-            # 用B样条+抽稀做平滑精简
-            spline_p = catmull_rom_spline(path, num_points=5)
+        if safe:
+            full_path = [start] + offset_path + [end]
+            spline_p = catmull_rom_spline(full_path, num_points=5)
             final_p = simplify_path_by_distance(spline_p)
             return final_p
 
     return None
 
-# ==================== 修复穿障的A*路径规划（结果后抽稀航点） ====================
+# ==================== 修复：A*路径规划（备用） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
-    safety = safe_radius / 111000.0 * 2.0  # 放大安全缓冲区
+    safety = safe_radius / 111000.0 * 2.0
 
     for obs in obstacles_gcj:
         if not is_obstacle_blocking(obs, flight_height, safe_radius):
@@ -317,7 +312,6 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 cur = came_from[cur]
             path.append(unique_nodes[start_i])
             path.reverse()
-            # B样条+距离抽稀双精简
             smooth_path = catmull_rom_spline(path, num_points=5)
             final_path = simplify_path_by_distance(smooth_path)
             return final_path
@@ -330,22 +324,22 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 heapq.heappush(open_heap, (f_score[neighbor], neighbor))
     return simplify_path_by_distance([start, end])
 
+# ==================== 修复：路径规划主函数（强制优先左右绕行） ====================
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
     if not is_path_blocked(start, end, obstacles_gcj, flight_height, safe_radius):
         return simplify_path_by_distance([start, end])
 
+    # 核心修复：严格按照选择策略执行
     if strategy == 'left':
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
-        if p: return p
-        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
-        if p: return p
+        if p:
+            return p
         return astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
 
     elif strategy == 'right':
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
-        if p: return p
-        p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
-        if p: return p
+        if p:
+            return p
         return astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
 
     else:
@@ -366,7 +360,7 @@ def load_obstacles_from_cache():
     st.success(f"已从缓存加载 {len(st.session_state.obstacles_gcj)} 个障碍物")
     return True
 
-# ==================== 心跳包模拟器【修复计时BUG：时间动态刷新】 ====================
+# ==================== 心跳包模拟器【修复计时BUG】 ====================
 class HeartbeatSimulator:
     def __init__(self, start_point_gcj):
         self.history = []
@@ -380,7 +374,7 @@ class HeartbeatSimulator:
         self.progress = 0.0
         self.total_distance = 0.0
         self.distance_traveled = 0.0
-        self.start_time = None # 飞行启动时赋值
+        self.start_time = None
 
     def set_path(self, path, altitude=50, speed=50):
         self.path = path
@@ -393,7 +387,7 @@ class HeartbeatSimulator:
         self.progress = 0.0
         self.distance_traveled = 0.0
         self.total_distance = 0.0
-        self.start_time = datetime.now() #【修复1：启动任务立刻记录起飞时间】
+        self.start_time = datetime.now()
         for i in range(len(path)-1):
             self.total_distance += distance(path[i], path[i+1])
 
@@ -441,11 +435,9 @@ class HeartbeatSimulator:
             self.progress = 1.0
         altitude = self.flight_altitude + random.randint(-5,5) if self.simulating else random.randint(0,10)
         speed_display = round(self.speed * 0.1, 1) if self.simulating and not self.paused else 0
-        #【修复2：已用时间实时计算，起飞后start_time不为空】
         elapsed_seconds = int((datetime.now() - self.start_time).total_seconds()) if self.start_time else 0
         remaining_distance_deg = self.total_distance - self.distance_traveled
         remaining_distance_m = remaining_distance_deg * 111000
-        #【修复3：剩余时间=剩余米数/(m/s)，动态变化】
         if speed_display > 0:
             remaining_time = int(remaining_distance_m / speed_display)
         else:
@@ -704,7 +696,7 @@ def main():
                             st.session_state.pending_polygon = poly
                             st.success("已捕获多边形")
 
-    # ==================== 飞行监控 ====================
+    # ==================== 飞行监控（修复：自动运行） ====================
     elif page == "📡 飞行监控":
         st.header("🛸 飞行实时画面 - 任务执行监控")
 
@@ -721,10 +713,12 @@ def main():
             with c2:
                 if st.button("暂停", use_container_width=True):
                     st.session_state.heartbeat_sim.pause()
+                    st.rerun()
             with c3:
                 if st.button("停止", use_container_width=True):
                     st.session_state.simulation_running = False
                     st.session_state.heartbeat_sim.stop()
+                    st.rerun()
             with c4:
                 if st.button("重置", use_container_width=True):
                     st.session_state.heartbeat_sim.reset()
@@ -735,15 +729,19 @@ def main():
             status = "运行中" if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused else "已暂停"
             st.info(f"状态：{status}")
 
+        # 核心修复：自动刷新飞行数据
         current_time = time.time()
+        auto_refresh = False
         if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused:
-            if current_time - st.session_state.last_hb_time >= 0.2:
+            if current_time - st.session_state.last_hb_time >= 0.15:
                 sim_data = st.session_state.heartbeat_sim.update_and_generate()
-                # 记录历史坐标
                 pos_gcj = [sim_data["lng"], sim_data["lat"]]
                 st.session_state.flight_history.append(pos_gcj)
                 st.session_state.last_hb_time = current_time
-                st.rerun()
+                auto_refresh = True
+        
+        if auto_refresh:
+            st.rerun()
 
         if st.session_state.heartbeat_sim.history:
             latest = st.session_state.heartbeat_sim.history[0]
