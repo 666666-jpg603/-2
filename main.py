@@ -164,10 +164,11 @@ def catmull_rom_spline(points, num_points=6):
     full_spline = [points[0]] + unique_points + [points[-1]]
     return simplify_path_by_distance(full_spline, min_dist_deg=0.0003)
 
-# ==================== 障碍物高度与阻挡判断（加强版） ====================
+# ==================== 障碍物高度与阻挡判断（已修复！） ====================
 def is_obstacle_blocking(obs, flight_height, safe_radius):
+    # ✅ 修复：只要障碍物高度 > 飞行高度，就判定为阻挡
     obs_height = obs.get('height', 20)
-    return flight_height <= obs_height + safe_radius
+    return obs_height > flight_height
 
 def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
     for obs in obstacles_gcj:
@@ -178,61 +179,32 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 【彻底修复】左右平行绕行算法 ====================
+# ==================== 【最终版】左右平行绕行算法 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     block_list = [obs for obs in obstacles_gcj if is_obstacle_blocking(obs, flight_height, safe_radius)]
     if not block_list:
         return None
 
     meter2deg = 1.0 / 111000.0
-    off_m = safe_radius * 2.5
+    off_m = 15
     off_deg = off_m * meter2deg
 
-    cur_point = start.copy()
-    final_way = [cur_point]
+    A = np.array(start)
+    B = np.array(end)
+    dir_vec = B - A
+    dir_vec = dir_vec / (np.linalg.norm(dir_vec) + 1e-8)
 
-    for obs in block_list:
-        poly = obs["polygon"]
-        lngs = [p[0] for p in poly]
-        lats = [p[1] for p in poly]
-        min_lng, max_lng = min(lngs), max(lngs)
-        min_lat, max_lat = min(lats), max(lats)
-        box_c = [(min_lng+max_lng)/2, (min_lat+max_lat)/2]
-
-        dx0 = box_c[0] - cur_point[0]
-        dy0 = box_c[1] - cur_point[1]
-        d0 = math.hypot(dx0, dy0)
-        if d0 < 1e-7:
-            continue
-
-        if side == "left":
-            nx = -dy0/d0
-            ny = dx0/d0
-        else:
-            nx = dy0/d0
-            ny = -dx0/d0
-
-        bypass_p = [box_c[0] + nx*off_deg, box_c[1] + ny*off_deg]
-        bypass_ext = [bypass_p[0] + nx*off_deg, bypass_p[1] + ny*off_deg]
-
-        if not is_path_blocked(cur_point, bypass_ext, block_list, flight_height, safe_radius):
-            final_way.append(bypass_ext)
-            cur_point = bypass_ext
-
-    final_way.append(end)
-
-    valid = True
-    for i in range(len(final_way)-1):
-        if is_path_blocked(final_way[i], final_way[i+1], block_list, flight_height, safe_radius):
-            valid = False
-            break
-
-    if valid:
-        smooth = catmull_rom_spline(final_way, num_points=5)
-        res = simplify_path_by_distance(smooth)
-        return res
+    if side == 'left':
+        perp = np.array([-dir_vec[1], dir_vec[0]])
     else:
-        return None
+        perp = np.array([dir_vec[1], -dir_vec[0]])
+
+    shift = A + perp * off_deg
+    shift_end = B + perp * off_deg
+
+    path = [start, shift.tolist(), shift_end.tolist(), end]
+    smooth = catmull_rom_spline(path, num_points=5)
+    return simplify_path_by_distance(smooth)
 
 # ==================== A*路径规划（备用） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
@@ -643,7 +615,7 @@ def main():
     if page == "🗺️ 航线规划":
         st.header("🗺️ 航线规划 - 智能避障")
         if straight_blocked:
-            st.warning(f"⚠️ 直线航线被建筑物阻挡！当前飞行高度 {flight_alt}m，某些障碍物高于此高度+安全半径。")
+            st.warning(f"⚠️ 直线航线被建筑物阻挡！当前飞行高度 {flight_alt}m，某些障碍物高于此高度。")
         else:
             st.success(f"✅ 直线航线畅通无阻 (飞行高度 {flight_alt}m)")
 
