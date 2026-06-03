@@ -110,7 +110,7 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
-# =====新增：航点距离抽稀函数（精简密集航点，核心优化1）=====
+# ===== 航点距离抽稀函数 =====
 def simplify_path_by_distance(points, min_dist_deg=0.0003):
     """按经纬度距离抽稀航线，小于阈值的航点剔除，保留首尾和拐点"""
     if len(points) <=2:
@@ -121,20 +121,18 @@ def simplify_path_by_distance(points, min_dist_deg=0.0003):
         if distance(last, p) >= min_dist_deg:
             new_path.append(p)
             last = p
-    # 强制保留终点
     if new_path[-1] != points[-1]:
         new_path.append(points[-1])
     return new_path
 
-# ==================== 三次B样条路径平滑（精简采样，优化航点数量） ====================
-def catmull_rom_spline(points, num_points=6): # 原20→6，减少采样密度
+# ==================== 三次B样条路径平滑 ====================
+def catmull_rom_spline(points, num_points=6):
     """Catmull-Rom 样条曲线，生成平滑+精简路径"""
     if len(points) < 2:
         return points
     if len(points) == 2:
         return [points[0], points[1]]
     
-    # 扩展首尾控制点，避免端点变形
     extended = [points[0]] + points + [points[-1]]
     spline_points = []
     
@@ -156,7 +154,6 @@ def catmull_rom_spline(points, num_points=6): # 原20→6，减少采样密度
                 (-p0[1] + 3*p1[1] - 3*p2[1] + p3[1]) * t3
             )
             spline_points.append([x, y])
-    # 去除重复点，保留首尾
     unique_points = []
     seen = set()
     for p in spline_points:
@@ -165,93 +162,130 @@ def catmull_rom_spline(points, num_points=6): # 原20→6，减少采样密度
             seen.add(key)
             unique_points.append(p)
     full_spline = [points[0]] + unique_points + [points[-1]]
-    # 新增：距离抽稀，进一步精简航点
     return simplify_path_by_distance(full_spline, min_dist_deg=0.0003)
 
-# ==================== 障碍物高度与阻挡判断（加强版） ====================
-def is_obstacle_blocking(obs, flight_height, safe_radius):
+# ==================== 障碍物高度与阻挡判断 ====================
+def is_obstacle_blocking(obs, flight_height):
+    # 核心：障碍物高度 > 飞行高度 才需要绕行
     obs_height = obs.get('height', 20)
-    # 严格模式：飞行高度必须 > 障碍物高度 + 安全半径，否则视为阻挡
-    return flight_height <= obs_height + safe_radius
+    return flight_height < obs_height
 
-def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
+def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
     for obs in obstacles_gcj:
-        coords = obs.get('polygon', [])
-        if coords and len(coords) >= 3:
-            if is_obstacle_blocking(obs, flight_height, safe_radius):
+        if is_obstacle_blocking(obs, flight_height):
+            coords = obs.get('polygon', [])
+            if coords and len(coords) >= 3:
                 if line_intersects_polygon(p1, p2, coords):
                     return True
     return False
 
-# ==================== 【重点优化】重构左右绕行：沿障碍物外围圆弧绕行，和A*绕行形态一致 ====================
+# ==================== 【完美优化】左右绕行：障碍物外轮廓圆弧绕行 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
-    # 收集所有起阻挡作用的障碍物
-    block_obs_list = []
+    # 筛选：仅高度高于飞行高度的障碍物需要绕行
+    block_obstacles = []
     for obs in obstacles_gcj:
-        if is_obstacle_blocking(obs, flight_height, safe_radius):
-            block_obs_list.append(obs['polygon'])
-    if not block_obs_list:
+        if is_obstacle_blocking(obs, flight_height):
+            block_obstacles.append(obs)
+    
+    if not block_obstacles:
         return None
 
-    offset_meter = safe_radius * 10.0
-    off_deg = offset_meter / 111000.0
-    raw_way = [start]
+    # 安全偏移距离（米转经纬度）
+    safe_offset = safe_radius / 111000.0
+    path_waypoints = [start]
 
-    # 遍历障碍物外轮廓做偏移绕点
-    for poly in block_obs_list:
-        poly_center_lng = sum([p[0] for p in poly]) / len(poly)
-        poly_center_lat = sum([p[1] for p in poly]) / len(poly)
-        dx_c = poly_center_lng - start[0]
-        dy_c = poly_center_lat - start[1]
-        Lc = math.hypot(dx_c, dy_c)
-        if Lc < 1e-8:
+    # 遍历每个障碍物，生成外切圆弧绕行点
+    for obs in block_obstacles:
+        polygon = obs['polygon']
+        if len(polygon) < 3:
             continue
-        # 左右法向偏移
-        if side == "left":
-            nx = -dy_c / Lc
-            ny = dx_c / Lc
-        else:
-            nx = dy_c / Lc
-            ny = -dx_c / Lc
-        # 障碍物外侧三个绕点，形成圆弧绕行
-        p_mid = [poly_center_lng + nx*off_deg, poly_center_lat + ny*off_deg]
-        p_up = [poly_center_lng + nx*off_deg*1.3 + dx_c/Lc*off_deg*0.6, poly_center_lat + ny*off_deg*1.3 + dy_c/Lc*off_deg*0.6]
-        p_down = [poly_center_lng + nx*off_deg*1.3 - dx_c/Lc*off_deg*0.6, poly_center_lat + ny*off_deg*1.3 - dy_c/Lc*off_deg*0.6]
-        raw_way += [p_down, p_mid, p_up]
-    raw_way.append(end)
+        
+        # 计算障碍物中心点
+        center_lng = sum(p[0] for p in polygon) / len(polygon)
+        center_lat = sum(p[1] for p in polygon) / len(polygon)
+        center = [center_lng, center_lat]
 
-    # 逐级放大偏移重试
-    for scale in [1,1.3,1.8,2.5,3.5]:
-        test_path = []
-        for idx in range(len(raw_way)-1):
-            s_p = raw_way[idx]
-            e_p = raw_way[idx+1]
-            seg_dx = e_p[0]-s_p[0]
-            seg_dy = e_p[1]-s_p[1]
-            seg_L = math.hypot(seg_dx, seg_dy)
-            if seg_L <1e-7:
-                test_path.append(s_p)
-                continue
-            if side == "left":
-                snx = -seg_dy/seg_L
-                sny = seg_dx/seg_L
-            else:
-                snx = seg_dy/seg_L
-                sny = -seg_dx/seg_L
-            mid_off = [(s_p[0]+e_p[0])/2 + snx*off_deg*scale, (s_p[1]+e_p[1])/2 + sny*off_deg*scale]
-            test_path += [s_p, mid_off]
-        test_path.append(end)
-        # 路径碰撞检测
-        path_ok = True
-        for i in range(len(test_path)-1):
-            if is_path_blocked(test_path[i], test_path[i+1], obstacles_gcj, flight_height, safe_radius):
-                path_ok = False
+        # 计算起点->障碍物中心的方向向量
+        dir_lng = center_lng - start[0]
+        dir_lat = center_lat - start[1]
+        dir_len = math.hypot(dir_lng, dir_lat)
+        if dir_len < 1e-8:
+            continue
+        
+        # 归一化方向向量
+        dir_lng /= dir_len
+        dir_lat /= dir_len
+
+        # 计算左右法向（垂直于飞行方向）
+        if side == 'left':
+            normal_lng = -dir_lat
+            normal_lat = dir_lng
+        else:
+            normal_lng = dir_lat
+            normal_lat = -dir_lng
+
+        # 生成3个绕行点，形成完美圆弧（完全在障碍物外侧）
+        offset_multiplier = 2.0  # 偏移倍数，确保远离障碍物
+        bypass_point1 = [
+            center_lng + normal_lng * safe_offset * offset_multiplier - dir_lng * safe_offset,
+            center_lat + normal_lat * safe_offset * offset_multiplier - dir_lat * safe_offset
+        ]
+        bypass_point2 = [
+            center_lng + normal_lng * safe_offset * offset_multiplier,
+            center_lat + normal_lat * safe_offset * offset_multiplier
+        ]
+        bypass_point3 = [
+            center_lng + normal_lng * safe_offset * offset_multiplier + dir_lng * safe_offset,
+            center_lat + normal_lat * safe_offset * offset_multiplier + dir_lat * safe_offset
+        ]
+
+        path_waypoints.extend([bypass_point1, bypass_point2, bypass_point3])
+
+    path_waypoints.append(end)
+
+    # 路径验证：确保绕行路径不碰撞障碍物
+    for attempt in range(5):
+        valid = True
+        for i in range(len(path_waypoints)-1):
+            if is_path_blocked(path_waypoints[i], path_waypoints[i+1], obstacles_gcj, flight_height):
+                valid = False
                 break
-        if path_ok:
-            spline_p = catmull_rom_spline(test_path, num_points=5)
-            final_p = simplify_path_by_distance(spline_p)
-            return final_p
-    return None
+        
+        if valid:
+            break
+        
+        # 无效则增大偏移重试
+        safe_offset *= 1.3
+        path_waypoints = [start]
+        for obs in block_obstacles:
+            polygon = obs['polygon']
+            center_lng = sum(p[0] for p in polygon) / len(polygon)
+            center_lat = sum(p[1] for p in polygon) / len(polygon)
+            dir_lng = center_lng - start[0]
+            dir_lat = center_lat - start[1]
+            dir_len = math.hypot(dir_lng, dir_lat)
+            if dir_len < 1e-8:
+                continue
+            dir_lng /= dir_len
+            dir_lat /= dir_len
+            
+            if side == 'left':
+                normal_lng = -dir_lat
+                normal_lat = dir_lng
+            else:
+                normal_lng = dir_lat
+                normal_lat = -dir_lng
+            
+            bp1 = [center_lng + normal_lng*safe_offset*2 - dir_lng*safe_offset, center_lat + normal_lat*safe_offset*2 - dir_lat*safe_offset]
+            bp2 = [center_lng + normal_lng*safe_offset*2, center_lat + normal_lat*safe_offset*2]
+            bp3 = [center_lng + normal_lng*safe_offset*2 + dir_lng*safe_offset, center_lat + normal_lat*safe_offset*2 + dir_lat*safe_offset]
+            path_waypoints.extend([bp1, bp2, bp3])
+        path_waypoints.append(end)
+
+    # 平滑+抽稀
+    smooth_path = catmull_rom_spline(path_waypoints, num_points=5)
+    final_path = simplify_path_by_distance(smooth_path)
+    return final_path
 
 # ==================== A*路径规划（备用） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
@@ -259,7 +293,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     safety = safe_radius / 111000.0 * 2.0
 
     for obs in obstacles_gcj:
-        if not is_obstacle_blocking(obs, flight_height, safe_radius):
+        if not is_obstacle_blocking(obs, flight_height):
             continue
         poly = obs.get('polygon', [])
         if len(poly) < 3:
@@ -306,7 +340,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
         for j in range(len(unique_nodes)):
             if i == j:
                 continue
-            if not is_path_blocked(unique_nodes[i], unique_nodes[j], obstacles_gcj, flight_height, safe_radius):
+            if not is_path_blocked(unique_nodes[i], unique_nodes[j], obstacles_gcj, flight_height):
                 graph[i].append((j, distance(unique_nodes[i], unique_nodes[j])))
 
     start_i = -1
@@ -350,17 +384,15 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
 
 # ==================== 路径规划主函数 ====================
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
-    if not is_path_blocked(start, end, obstacles_gcj, flight_height, safe_radius):
+    if not is_path_blocked(start, end, obstacles_gcj, flight_height):
         path = simplify_path_by_distance([start, end])
-        # 直线无阻挡也写入规划日志
         add_gcs_obc_fcu_log(f"航线规划完成 | 类型:horizontal | 航点数:{len(path)} | 路径长度:{round(sum([distance(path[i],path[i+1])*111000 for i in range(len(path)-1)]),1)}m")
         return path
 
-    # 按策略优先绕行
     if strategy == 'left':
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
         if p:
-            add_gcs_obc_fcu_log(f"航线规划完成 | 类型:horizontal | 航点数:{len(p)} | 路径长度:{round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)}m")
+            add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向左绕行 | 航点数:{len(p)} | 路径长度:{round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)}m")
             return p
         ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
         add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* | 航点数:{len(ast_p)} | 路径长度:{round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)}m")
@@ -368,23 +400,23 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
     elif strategy == 'right':
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
         if p:
-            add_gcs_obc_fcu_log(f"航线规划完成 | 类型:horizontal | 航点数:{len(p)} | 路径长度:{round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)}m")
+            add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向右绕行 | 航点数:{len(p)} | 路径长度:{round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)}m")
             return p
         ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
         add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* | 航点数:{len(ast_p)} | 路径长度:{round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)}m")
         return ast_p
     else:
         ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
-        add_gcs_obc_fcu_log(f"开始航线规划 | 算法:A* | 障碍物数量:{len([o for o in obstacles_gcj if is_obstacle_blocking(o,flight_height,safe_radius)])}")
+        add_gcs_obc_fcu_log(f"开始航线规划 | 算法:A* | 障碍物数量:{len([o for o in obstacles_gcj if is_obstacle_blocking(o,flight_height)])}")
         add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* | 航点数:{len(ast_p)} | 路径长度:{round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)}m")
         return ast_p
 
 # ==================== 【新增：通信日志全局函数】 ====================
 def init_comm_log():
     if "gcs2fcu_log" not in st.session_state:
-        st.session_state.gcs2fcu_log = []    # GCS->OBC->FCU下发日志
+        st.session_state.gcs2fcu_log = []
     if "fcu2gcs_log" not in st.session_state:
-        st.session_state.fcu2gcs_log = []    # FCU->OBC->GCS回传日志
+        st.session_state.fcu2gcs_log = []
 
 def add_gcs_obc_fcu_log(msg):
     init_comm_log()
@@ -426,7 +458,7 @@ class HeartbeatSimulator:
         self.total_distance = 0.0
         self.distance_traveled = 0.0
         self.start_time = None
-        self.wp_logged = set() # 标记已经记录抵达日志的航点
+        self.wp_logged = set()
 
     def set_path(self, path, altitude=50, speed=50):
         self.path = path
@@ -441,7 +473,6 @@ class HeartbeatSimulator:
         self.total_distance = 0.0
         self.start_time = datetime.now()
         self.wp_logged = set()
-        # 起飞ACK日志
         add_fcu_obc_gcs_log("FCU→OBC→GCS: ACK | Mode: AUTO")
         for i in range(len(path)-1):
             self.total_distance += distance(path[i], path[i+1])
@@ -475,7 +506,6 @@ class HeartbeatSimulator:
             if dist_to_target < step:
                 self.distance_traveled += dist_to_target
                 self.current_pos = target.copy()
-                # 航点到达日志
                 wp_idx = self.path_index +1
                 if wp_idx not in self.wp_logged:
                     add_fcu_obc_gcs_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}")
@@ -488,7 +518,6 @@ class HeartbeatSimulator:
                 self.distance_traveled += step
             if self.total_distance > 0:
                 self.progress = min(1.0, self.distance_traveled / self.total_distance)
-            # 全部航点跑完，任务完成日志
             if self.path_index >= len(self.path)-1:
                 self.simulating = False
                 self.progress = 1.0
@@ -647,8 +676,7 @@ def main():
         st.session_state.points_gcj['A'],
         st.session_state.points_gcj['B'],
         st.session_state.obstacles_gcj,
-        st.session_state.flight_altitude,
-        safe_radius
+        st.session_state.flight_altitude
     )
     st.sidebar.info(f"🏫 校园区域\n🚧 障碍物: {obs_count}\n📌 直线: {'🚫 被阻挡' if straight_blocked else '✅ 畅通'}")
 
@@ -667,7 +695,7 @@ def main():
     if page == "🗺️ 航线规划":
         st.header("🗺️ 航线规划 - 智能避障")
         if straight_blocked:
-            st.warning(f"⚠️ 直线航线被建筑物阻挡！当前飞行高度 {flight_alt}m，某些障碍物高于此高度+安全半径。")
+            st.warning(f"⚠️ 直线航线被建筑物阻挡！障碍物高度 > 当前飞行高度 {flight_alt}m")
         else:
             st.success(f"✅ 直线航线畅通无阻 (飞行高度 {flight_alt}m)")
 
@@ -760,7 +788,7 @@ def main():
                             st.session_state.pending_polygon = poly
                             st.success("已捕获多边形")
 
-    # ==================== 飞行监控（新增完整通信拓扑+三级通信日志） ====================
+    # ==================== 飞行监控 ====================
     elif page == "📡 飞行监控":
         st.header("🛸 飞行实时画面 - 任务执行监控")
 
@@ -793,7 +821,6 @@ def main():
             status = "运行中" if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused else "已暂停"
             st.info(f"状态：{status}")
 
-        # 自动刷新飞行数据
         current_time = time.time()
         auto_refresh = False
         if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused:
@@ -827,10 +854,8 @@ def main():
                 m = create_planning_map(center, st.session_state.points_gcj, st.session_state.obstacles_gcj,
                                        st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked, safe_radius)
                 folium_static(m, width=600, height=400)
-            # ========== 完全对标参考图4：通信拓扑+双栏通信日志 ==========
             with comm_col:
                 st.subheader("📡 通信链路拓扑与数据流")
-                # 拓扑框图HTML
                 topo_html = '''
                 <div style="display:flex; justify-content:space-around; text-align:center; margin-top:10px;">
                     <div style="width:28%; padding:12px; background:#e3f2fd; border:2px solid #1976d2; border-radius:8px;">
@@ -857,14 +882,13 @@ def main():
                 '''
                 st.markdown(topo_html, unsafe_allow_html=True)
 
-                # 双标签页日志
                 tab1, tab2 = st.tabs(["📤GCS→OBC→FCU下发日志", "📥FCU→OBC→GCS回传日志"])
                 with tab1:
                     log_text1 = ""
                     if len(st.session_state.gcs2fcu_log) ==0:
                         log_text1 = "暂无航线下发日志\n点击重新规划生成航线即可生成日志"
                     else:
-                        for line in st.session_state.gcs2fcu_log[-30:]: #只显示最新30条
+                        for line in st.session_state.gcs2fcu_log[-30:]:
                             log_text1 += line + "\n"
                     st.text_area("", log_text1, height=220)
                 with tab2:
