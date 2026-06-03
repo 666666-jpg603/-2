@@ -110,9 +110,25 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
-# ==================== 三次B样条路径平滑（极致平滑） ====================
-def catmull_rom_spline(points, num_points=20):
-    """Catmull-Rom 样条曲线，生成极致平滑路径"""
+# =====新增：航点距离抽稀函数（精简密集航点，核心优化1）=====
+def simplify_path_by_distance(points, min_dist_deg=0.0003):
+    """按经纬度距离抽稀航线，小于阈值的航点剔除，保留首尾和拐点"""
+    if len(points) <=2:
+        return points
+    new_path = [points[0]]
+    last = points[0]
+    for p in points[1:]:
+        if distance(last, p) >= min_dist_deg:
+            new_path.append(p)
+            last = p
+    # 强制保留终点
+    if new_path[-1] != points[-1]:
+        new_path.append(points[-1])
+    return new_path
+
+# ==================== 三次B样条路径平滑（精简采样，优化航点数量） ====================
+def catmull_rom_spline(points, num_points=6): # 原20→6，减少采样密度
+    """Catmull-Rom 样条曲线，生成平滑+精简路径"""
     if len(points) < 2:
         return points
     if len(points) == 2:
@@ -148,7 +164,9 @@ def catmull_rom_spline(points, num_points=20):
         if key not in seen:
             seen.add(key)
             unique_points.append(p)
-    return [points[0]] + unique_points + [points[-1]]
+    full_spline = [points[0]] + unique_points + [points[-1]]
+    # 新增：距离抽稀，进一步精简航点
+    return simplify_path_by_distance(full_spline, min_dist_deg=0.0003)
 
 # ==================== 障碍物高度与阻挡判断（加强版） ====================
 def is_obstacle_blocking(obs, flight_height, safe_radius):
@@ -165,7 +183,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height, safe_radius):
                     return True
     return False
 
-# ==================== 优化后的平行偏移绕行 ====================
+# ==================== 优化后的平行偏移绕行（减少分段，控制点变少） ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     lng1, lat1 = start
     lng2, lat2 = end
@@ -186,10 +204,10 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
 
     offset_meter = safe_radius * 6.0  # 进一步加大偏移距离，避免穿障
     offset_deg = offset_meter / 111000.0
-    seg_num = 20  # 增加路径点，提升平滑度
+    seg_num = 6  # 原20→6，大幅减少中间采样点（优化航点核心）
 
     # 多级偏移尝试
-    for scale in [1, 1.5, 2, 3, 4, 6, 8]:
+    for scale in [1, 1.5, 2, 3, 4]:
         off_deg = offset_deg * scale
         middle = []
         for i in range(1, seg_num):
@@ -209,12 +227,14 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
                 ok = False
                 break
         if ok:
-            # 用B样条做极致平滑
-            return catmull_rom_spline(path, num_points=10)
+            # 用B样条+抽稀做平滑精简
+            spline_p = catmull_rom_spline(path, num_points=5)
+            final_p = simplify_path_by_distance(spline_p)
+            return final_p
 
     return None
 
-# ==================== 修复穿障的A*路径规划 ====================
+# ==================== 修复穿障的A*路径规划（结果后抽稀航点） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
     safety = safe_radius / 111000.0 * 2.0  # 放大安全缓冲区
@@ -278,7 +298,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
         if abs(n[0] - end[0]) < 1e-6 and abs(n[1] - end[1]) < 1e-6:
             end_i = i
     if start_i == -1 or end_i == -1:
-        return [start, end]
+        return simplify_path_by_distance([start, end])
 
     open_heap = []
     heapq.heappush(open_heap, (0, start_i))
@@ -297,8 +317,10 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 cur = came_from[cur]
             path.append(unique_nodes[start_i])
             path.reverse()
-            # 用B样条做极致平滑
-            return catmull_rom_spline(path, num_points=10)
+            # B样条+距离抽稀双精简
+            smooth_path = catmull_rom_spline(path, num_points=5)
+            final_path = simplify_path_by_distance(smooth_path)
+            return final_path
         for neighbor, w in graph[cur]:
             new_g = g_score[cur] + w
             if new_g < g_score[neighbor]:
@@ -306,11 +328,11 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 g_score[neighbor] = new_g
                 f_score[neighbor] = new_g + distance(unique_nodes[neighbor], unique_nodes[end_i])
                 heapq.heappush(open_heap, (f_score[neighbor], neighbor))
-    return [start, end]
+    return simplify_path_by_distance([start, end])
 
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
     if not is_path_blocked(start, end, obstacles_gcj, flight_height, safe_radius):
-        return [start, end]
+        return simplify_path_by_distance([start, end])
 
     if strategy == 'left':
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
@@ -344,7 +366,7 @@ def load_obstacles_from_cache():
     st.success(f"已从缓存加载 {len(st.session_state.obstacles_gcj)} 个障碍物")
     return True
 
-# ==================== 心跳包模拟器 ====================
+# ==================== 心跳包模拟器【修复计时BUG：时间动态刷新】 ====================
 class HeartbeatSimulator:
     def __init__(self, start_point_gcj):
         self.history = []
@@ -358,7 +380,7 @@ class HeartbeatSimulator:
         self.progress = 0.0
         self.total_distance = 0.0
         self.distance_traveled = 0.0
-        self.start_time = None
+        self.start_time = None # 飞行启动时赋值
 
     def set_path(self, path, altitude=50, speed=50):
         self.path = path
@@ -371,7 +393,7 @@ class HeartbeatSimulator:
         self.progress = 0.0
         self.distance_traveled = 0.0
         self.total_distance = 0.0
-        self.start_time = datetime.now()
+        self.start_time = datetime.now() #【修复1：启动任务立刻记录起飞时间】
         for i in range(len(path)-1):
             self.total_distance += distance(path[i], path[i+1])
 
@@ -419,9 +441,15 @@ class HeartbeatSimulator:
             self.progress = 1.0
         altitude = self.flight_altitude + random.randint(-5,5) if self.simulating else random.randint(0,10)
         speed_display = round(self.speed * 0.1, 1) if self.simulating and not self.paused else 0
+        #【修复2：已用时间实时计算，起飞后start_time不为空】
         elapsed_seconds = int((datetime.now() - self.start_time).total_seconds()) if self.start_time else 0
-        remaining_distance = self.total_distance - self.distance_traveled
-        remaining_time = int(remaining_distance / (speed_display * 1000 / 3600)) if speed_display > 0 else 0
+        remaining_distance_deg = self.total_distance - self.distance_traveled
+        remaining_distance_m = remaining_distance_deg * 111000
+        #【修复3：剩余时间=剩余米数/(m/s)，动态变化】
+        if speed_display > 0:
+            remaining_time = int(remaining_distance_m / speed_display)
+        else:
+            remaining_time = 0
         battery = max(0, round(100 - (elapsed_seconds / 600) * 4, 0)) if self.simulating else 96
         data = {
             "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -437,7 +465,7 @@ class HeartbeatSimulator:
             "simulating": self.simulating,
             "paused": self.paused,
             "elapsed_time": elapsed_seconds,
-            "remaining_distance": round(remaining_distance * 111000, 1),
+            "remaining_distance": round(remaining_distance_m, 1),
             "remaining_time": remaining_time,
             "battery": int(battery),
             "current_waypoint": self.path_index + 1,
@@ -710,7 +738,10 @@ def main():
         current_time = time.time()
         if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused:
             if current_time - st.session_state.last_hb_time >= 0.2:
-                st.session_state.heartbeat_sim.update_and_generate()
+                sim_data = st.session_state.heartbeat_sim.update_and_generate()
+                # 记录历史坐标
+                pos_gcj = [sim_data["lng"], sim_data["lat"]]
+                st.session_state.flight_history.append(pos_gcj)
                 st.session_state.last_hb_time = current_time
                 st.rerun()
 
