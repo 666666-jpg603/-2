@@ -231,65 +231,179 @@ def polygon_side_offset(poly, off_deg, side):
         new_p.append(off_pt)
     return new_p
 
-# ==================== 【彻底修复】单侧绕行算法，严格沿障碍物一边绕行 ====================
+# ==================== 【修复】单侧绕行算法，严格沿障碍物一边绕行 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
+    # 获取需要绕行的障碍物（高度大于飞行高度的）
     block_obs = [obs for obs in obstacles_gcj if is_obstacle_blocking(obs, flight_height)]
     if not block_obs:
         return None
+    
     base_off = safe_radius / 111000.0
-    test_scales = [1.0,1.4,1.9,2.5,3.2]
+    test_scales = [1.0, 1.4, 1.9, 2.5, 3.2, 4.0, 5.0]
 
     for scale in test_scales:
         curr_off = base_off * scale
+        # 从起点开始构建路径
         full_route = [start]
-        valid_flag = True
+        current_point = start
+        
+        # 对每个障碍物依次处理
         for obs in block_obs:
             raw_poly = obs["polygon"]
-            if len(raw_poly)<3:
+            if len(raw_poly) < 3:
                 continue
+            
             # 生成障碍物单侧安全外轮廓
             outer_poly = polygon_side_offset(raw_poly, curr_off, side)
-            line_ab = [start, end]
+            
+            # 查找从当前点到终点的连线与外轮廓的交点
+            line_current_to_end = [current_point, end]
             cross_pts = []
-            # 查找直线AB和外轮廓所有交点
+            cross_info = []  # 存储交点和对应的边索引
+            
             poly_n = len(outer_poly)
             for i in range(poly_n):
                 s_p = outer_poly[i]
                 e_p = outer_poly[(i+1)%poly_n]
-                cp = seg_intersection(line_ab[0], line_ab[1], s_p, e_p)
+                cp = seg_intersection(line_current_to_end[0], line_current_to_end[1], s_p, e_p)
                 if cp is not None:
                     cross_pts.append(cp)
-            if len(cross_pts)<2:
+                    cross_info.append((cp, i))
+            
+            if len(cross_pts) < 2:
+                # 如果没有足够交点，尝试从起点直接连接
                 continue
-            # 入点、出点
-            p_in = cross_pts[0]
-            p_out = cross_pts[-1]
-            # 找到轮廓上离入、出点最近的下标
-            idx_in = min(range(poly_n), key=lambda x:distance(outer_poly[x], p_in))
-            idx_out = min(range(poly_n), key=lambda x:distance(outer_poly[x], p_out))
-            # 沿着单侧轮廓截取绕行段
-            if idx_in <= idx_out:
-                bypass_seg = outer_poly[idx_in:idx_out+1]
+            
+            # 按距离当前点的距离排序
+            cross_pts_sorted = sorted(cross_pts, key=lambda p: distance(current_point, p))
+            p_in = cross_pts_sorted[0]
+            p_out = cross_pts_sorted[-1]
+            
+            # 找到轮廓上离入点最近的边和点
+            idx_in = -1
+            idx_out = -1
+            min_dist_in = float('inf')
+            min_dist_out = float('inf')
+            
+            for i in range(poly_n):
+                s_p = outer_poly[i]
+                e_p = outer_poly[(i+1)%poly_n]
+                # 计算点到线段的距离
+                d_in = point_to_segment_distance(p_in, s_p, e_p)
+                d_out = point_to_segment_distance(p_out, s_p, e_p)
+                if d_in < min_dist_in:
+                    min_dist_in = d_in
+                    idx_in = i
+                if d_out < min_dist_out:
+                    min_dist_out = d_out
+                    idx_out = i
+            
+            if idx_in == -1 or idx_out == -1:
+                continue
+            
+            # 构建沿着轮廓的绕行路径
+            bypass_seg = []
+            
+            # 添加入点
+            bypass_seg.append(p_in)
+            
+            # 决定绕行方向（沿轮廓顺时针或逆时针）
+            # 计算两种路径的长度，选择较短的
+            path1 = []
+            path2 = []
+            
+            i = idx_in
+            while i != idx_out:
+                path1.append(outer_poly[i])
+                i = (i + 1) % poly_n
+                if i == idx_in:  # 防止无限循环
+                    break
+            path1.append(outer_poly[idx_out])
+            
+            i = idx_in
+            while i != idx_out:
+                path2.append(outer_poly[i])
+                i = (i - 1 + poly_n) % poly_n
+                if i == idx_in:  # 防止无限循环
+                    break
+            path2.append(outer_poly[idx_out])
+            
+            # 选择较短的路径，同时考虑绕行方向（左/右偏好的影响）
+            len1 = sum(distance(path1[j], path1[j+1]) for j in range(len(path1)-1))
+            len2 = sum(distance(path2[j], path2[j+1]) for j in range(len(path2)-1))
+            
+            # 根据side偏好选择方向
+            if side == 'left':
+                # 优先选择逆时针方向（假设left对应逆时针）
+                chosen_path = path1 if len1 <= len2 else path2
             else:
-                bypass_seg = outer_poly[idx_in:] + outer_poly[:idx_out+1]
-            # 拼接路径
-            full_route.append(p_in)
-            full_route.extend(bypass_seg)
-            full_route.append(p_out)
-        full_route.append(end)
+                # 优先选择顺时针方向
+                chosen_path = path2 if len2 <= len1 else path1
+            
+            # 添加轮廓路径点（不包括入点，因为已经添加了）
+            for pt in chosen_path[1:]:  # 跳过第一个点（入点已经添加）
+                if distance(bypass_seg[-1], pt) > 1e-10:
+                    bypass_seg.append(pt)
+            
+            # 添加出点（如果最后一个点不是出点）
+            if distance(bypass_seg[-1], p_out) > 1e-10:
+                bypass_seg.append(p_out)
+            
+            # 添加从当前点到入点的直线段
+            if distance(current_point, p_in) > 1e-10:
+                # 检查这段是否被其他障碍物阻挡
+                if not is_path_blocked(current_point, p_in, obstacles_gcj, flight_height):
+                    full_route.append(p_in)
+                else:
+                    full_route.append(p_in)
+            
+            # 添加绕行路径
+            for pt in bypass_seg:
+                if distance(full_route[-1], pt) > 1e-10:
+                    full_route.append(pt)
+            
+            # 更新当前点
+            current_point = p_out
+        
+        # 添加终点
+        if distance(current_point, end) > 1e-10:
+            full_route.append(end)
+        
         # 整段路径碰撞校验
         crash = False
         for s in range(len(full_route)-1):
             if is_path_blocked(full_route[s], full_route[s+1], obstacles_gcj, flight_height):
                 crash = True
                 break
-        if not crash:
+        
+        if not crash and len(full_route) >= 2:
             # 平滑抽稀
             smooth_p = catmull_rom_spline(full_route, num_points=5)
             final_p = simplify_path_by_distance(smooth_p)
             return final_p
+    
     # 全部倍率失败，降级返回A*
     return None
+
+def point_to_segment_distance(point, seg_start, seg_end):
+    """计算点到线段的最短距离"""
+    x0, y0 = point
+    x1, y1 = seg_start
+    x2, y2 = seg_end
+    
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    if dx == 0 and dy == 0:
+        return distance(point, seg_start)
+    
+    t = ((x0 - x1) * dx + (y0 - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0, min(1, t))
+    
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    
+    return distance(point, [proj_x, proj_y])
 
 # ==================== A*路径规划（备用，原逻辑不变） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
@@ -399,7 +513,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
             add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向左绕行 | 航点数:{len(p)} | 路径长度:{round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)}m")
             return p
         ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
-        add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* | 航点数:{len(ast_p)} | 路径长度:{round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)}m")
+        add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* (左绕行失败降级) | 航点数:{len(ast_p)} | 路径长度:{round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)}m")
         return ast_p
     elif strategy == 'right':
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
@@ -407,7 +521,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
             add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向右绕行 | 航点数:{len(p)} | 路径长度:{round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)}m")
             return p
         ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
-        add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* | 航点数:{len(ast_p)} | 路径长度:{round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)}m")
+        add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* (右绕行失败降级) | 航点数:{len(ast_p)} | 路径长度:{round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)}m")
         return ast_p
     else:
         ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
