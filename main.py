@@ -110,6 +110,25 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
+# 线段求交点
+def seg_intersection(seg1_s, seg1_e, seg2_s, seg2_e):
+    x1,y1 = seg1_s
+    x2,y2 = seg1_e
+    x3,y3 = seg2_s
+    x4,y4 = seg2_e
+    den = (x1-x2)*(y3-y4)-(y1-y2)*(x3-x4)
+    if abs(den)<1e-12:
+        return None
+    t_num = (x1-x3)*(y3-y4)-(y1-y3)*(x3-x4)
+    u_num = -((x1-x2)*(y1-y3)-(y1-y2)*(x1-x3))
+    t = t_num/den
+    u = u_num/den
+    if 0<=t<=1 and 0<=u<=1:
+        x = x1 + t*(x2-x1)
+        y = y1 + t*(y2-y1)
+        return [x,y]
+    return None
+
 # ===== 航点距离抽稀函数 =====
 def simplify_path_by_distance(points, min_dist_deg=0.0003):
     """按经纬度距离抽稀航线，小于阈值的航点剔除，保留首尾和拐点"""
@@ -179,138 +198,98 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
                     return True
     return False
 
-# ==================== 【修复版】多边形外扩绕行算法：沿障碍物侧边左右绕行，不穿建筑 ====================
-def offset_polygon(poly, offset_deg, side):
-    """多边形整体向内/外偏移，side:left=左法向外扩，right=右法向外扩"""
-    new_poly = []
+# ==================== 多边形单侧外扩（左/右安全缓冲区） ====================
+def polygon_side_offset(poly, off_deg, side):
+    new_p = []
     n = len(poly)
     for i in range(n):
-        p = poly[i]
+        pi = poly[i]
         p_prev = poly[(i-1)%n]
         p_next = poly[(i+1)%n]
-        # 两条边向量
-        e1 = [p[0]-p_prev[0], p[1]-p_prev[1]]
-        e2 = [p_next[0]-p[0], p_next[1]-p[1]]
-        # 单位法向量
-        len1 = math.hypot(e1[0], e1[1])
-        len2 = math.hypot(e2[0], e2[1])
-        if len1<1e-8 or len2<1e-8:
-            new_poly.append(p)
+        # 前后边向量
+        e_prev = [pi[0]-p_prev[0], pi[1]-p_prev[1]]
+        e_next = [p_next[0]-pi[0], p_next[1]-pi[1]]
+        l_prev = math.hypot(e_prev[0], e_prev[1])
+        l_next = math.hypot(e_next[0], e_next[1])
+        if l_prev<1e-7 or l_next<1e-7:
+            new_p.append(pi)
             continue
-        if side == 'left':
-            n1 = [-e1[1]/len1, e1[0]/len1]
-            n2 = [-e2[1]/len2, e2[0]/len2]
+        # 法向：left=逆时针外扩，right=顺时针外扩
+        if side == "left":
+            n_prev = [-e_prev[1]/l_prev, e_prev[0]/l_prev]
+            n_next = [-e_next[1]/l_next, e_next[0]/l_next]
         else:
-            n1 = [e1[1]/len1, -e1[0]/len1]
-            n2 = [e2[1]/len2, -e2[0]/len2]
+            n_prev = [e_prev[1]/l_prev, -e_prev[0]/l_prev]
+            n_next = [e_next[1]/l_next, -e_next[0]/l_next]
         # 角平分线
-        nm = [n1[0]+n2[0], n1[1]+n2[1]]
+        nm = [n_prev[0]+n_next[0], n_prev[1]+n_next[1]]
         nm_len = math.hypot(nm[0], nm[1])
-        if nm_len <1e-8:
-            off_p = [p[0]+n1[0]*offset_deg, p[1]+n1[1]*offset_deg]
+        if nm_len<1e-7:
+            off_pt = [pi[0]+n_prev[0]*off_deg, pi[1]+n_prev[1]*off_deg]
         else:
-            off_p = [p[0]+nm[0]/nm_len*offset_deg, p[1]+nm[1]/nm_len*offset_deg]
-        new_poly.append(off_p)
-    return new_poly
+            off_pt = [pi[0]+nm[0]/nm_len*off_deg, pi[1]+nm[1]/nm_len*off_deg]
+        new_p.append(off_pt)
+    return new_p
 
+# ==================== 【彻底修复】单侧绕行算法，严格沿障碍物一边绕行 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
-    # 筛选：仅高度高于飞行高度的障碍物需要绕行
-    block_obstacles = []
-    for obs in obstacles_gcj:
-        if is_obstacle_blocking(obs, flight_height):
-            block_obstacles.append(obs)
-    if not block_obstacles:
+    block_obs = [obs for obs in obstacles_gcj if is_obstacle_blocking(obs, flight_height)]
+    if not block_obs:
         return None
+    base_off = safe_radius / 111000.0
+    test_scales = [1.0,1.4,1.9,2.5,3.2]
 
-    offset_deg = safe_radius / 111000.0
-    final_route = [start]
-
-    for obs in block_obstacles:
-        raw_poly = obs['polygon']
-        if len(raw_poly)<3:
-            continue
-        # 障碍物外扩安全缓冲区轮廓
-        outer_poly = offset_polygon(raw_poly, offset_deg, side)
-        # 找起点→终点连线和障碍物的入点、出点
-        cross_in = None
-        cross_out = None
-        line_seg = [start, end]
-        poly_n = len(outer_poly)
-        # 查找进出多边形的两个交点
-        cross_points = []
-        for i in range(poly_n):
-            pa = outer_poly[i]
-            pb = outer_poly[(i+1)%poly_n]
-            if segments_intersect(line_seg[0], line_seg[1], pa, pb):
-                # 简易取边中点作为绕行切入点
-                cross_points.append([(pa[0]+pb[0])/2, (pa[1]+pb[1])/2])
-        if len(cross_points)>=2:
-            cross_in = cross_points[0]
-            cross_out = cross_points[-1]
-        else:
-            # 无交点则跳过该障碍物
-            continue
-
-        # 沿外轮廓从入点走到出点
-        idx_in = min(range(poly_n), key=lambda x:distance(outer_poly[x], cross_in))
-        idx_out = min(range(poly_n), key=lambda x:distance(outer_poly[x], cross_out))
-        bypass_segment = []
-        if idx_in <= idx_out:
-            bypass_segment = outer_poly[idx_in:idx_out+1]
-        else:
-            bypass_segment = outer_poly[idx_in:] + outer_poly[:idx_out+1]
-        # 拼接绕行段
-        final_route.append(cross_in)
-        final_route.extend(bypass_segment)
-        final_route.append(cross_out)
-
-    final_route.append(end)
-
-    # 逐级放大偏移重试，直到路径无碰撞
-    test_scale = [1.0,1.3,1.8,2.2,3.0]
-    for scale in test_scale:
-        temp_offset = offset_deg * scale
-        temp_route = [start]
+    for scale in test_scales:
+        curr_off = base_off * scale
+        full_route = [start]
         valid_flag = True
-        for obs in block_obstacles:
-            raw_poly = obs['polygon']
+        for obs in block_obs:
+            raw_poly = obs["polygon"]
             if len(raw_poly)<3:
                 continue
-            outer_poly = offset_polygon(raw_poly, temp_offset, side)
-            cross_points = []
+            # 生成障碍物单侧安全外轮廓
+            outer_poly = polygon_side_offset(raw_poly, curr_off, side)
+            line_ab = [start, end]
+            cross_pts = []
+            # 查找直线AB和外轮廓所有交点
             poly_n = len(outer_poly)
             for i in range(poly_n):
-                pa = outer_poly[i]
-                pb = outer_poly[(i+1)%poly_n]
-                if segments_intersect(start, end, pa, pb):
-                    cross_points.append([(pa[0]+pb[0])/2, (pa[1]+pb[1])/2])
-            if len(cross_points)<2:
+                s_p = outer_poly[i]
+                e_p = outer_poly[(i+1)%poly_n]
+                cp = seg_intersection(line_ab[0], line_ab[1], s_p, e_p)
+                if cp is not None:
+                    cross_pts.append(cp)
+            if len(cross_pts)<2:
                 continue
-            cin,cout = cross_points[0], cross_points[-1]
-            idx_in = min(range(poly_n), key=lambda x:distance(outer_poly[x], cin))
-            idx_out = min(range(poly_n), key=lambda x:distance(outer_poly[x], cout))
+            # 入点、出点
+            p_in = cross_pts[0]
+            p_out = cross_pts[-1]
+            # 找到轮廓上离入、出点最近的下标
+            idx_in = min(range(poly_n), key=lambda x:distance(outer_poly[x], p_in))
+            idx_out = min(range(poly_n), key=lambda x:distance(outer_poly[x], p_out))
+            # 沿着单侧轮廓截取绕行段
             if idx_in <= idx_out:
-                seg = outer_poly[idx_in:idx_out+1]
+                bypass_seg = outer_poly[idx_in:idx_out+1]
             else:
-                seg = outer_poly[idx_in:]+outer_poly[:idx_out+1]
-            temp_route.append(cin)
-            temp_route.extend(seg)
-            temp_route.append(cout)
-        temp_route.append(end)
-        # 碰撞校验
+                bypass_seg = outer_poly[idx_in:] + outer_poly[:idx_out+1]
+            # 拼接路径
+            full_route.append(p_in)
+            full_route.extend(bypass_seg)
+            full_route.append(p_out)
+        full_route.append(end)
+        # 整段路径碰撞校验
         crash = False
-        for s in range(len(temp_route)-1):
-            if is_path_blocked(temp_route[s], temp_route[s+1], obstacles_gcj, flight_height):
-                crash=True
+        for s in range(len(full_route)-1):
+            if is_path_blocked(full_route[s], full_route[s+1], obstacles_gcj, flight_height):
+                crash = True
                 break
         if not crash:
-            final_route = temp_route
-            break
-
-    # 平滑+抽稀输出最终路径
-    smooth_path = catmull_rom_spline(final_route, num_points=5)
-    final_path = simplify_path_by_distance(smooth_path)
-    return final_path
+            # 平滑抽稀
+            smooth_p = catmull_rom_spline(full_route, num_points=5)
+            final_p = simplify_path_by_distance(smooth_p)
+            return final_p
+    # 全部倍率失败，降级返回A*
+    return None
 
 # ==================== A*路径规划（备用，原逻辑不变） ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
@@ -407,7 +386,7 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 heapq.heappush(open_heap, (f_score[neighbor], neighbor))
     return simplify_path_by_distance([start, end])
 
-# ==================== 路径规划主函数（原逻辑不变） ====================
+# ==================== 路径规划主函数（原逻辑完全保留） ====================
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
     if not is_path_blocked(start, end, obstacles_gcj, flight_height):
         path = simplify_path_by_distance([start, end])
@@ -648,7 +627,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
             folium.PolyLine(trail, color="orange", weight=2, opacity=0.6, popup="历史轨迹").add_to(m)
     return m
 
-# ==================== 主程序（全部原有逻辑保留） ====================
+# ==================== 主程序（全部原有逻辑保留不动） ====================
 def main():
     init_comm_log()
     st.title("🏫 无人机地面站系统 - 平行偏移绕行")
