@@ -110,43 +110,38 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
+# 线段求交点
+def seg_intersection(seg1_s, seg1_e, seg2_s, seg2_e):
+    x1,y1 = seg1_s
+    x2,y2 = seg1_e
+    x3,y3 = seg2_s
+    x4,y4 = seg2_e
+    den = (x1-x2)*(y3-y4)-(y1-y2)*(x3-x4)
+    if abs(den)<1e-12:
+        return None
+    t_num = (x1-x3)*(y3-y4)-(y1-y3)*(x3-x4)
+    u_num = -((x1-x2)*(y1-y3)-(y1-y2)*(x1-x3))
+    t = t_num/den
+    u = u_num/den
+    if 0<=t<=1 and 0<=u<=1:
+        x = x1 + t*(x2-x1)
+        y = y1 + t*(y2-y1)
+        return [x,y]
+    return None
+
 def get_polygon_centroid(polygon):
     """计算多边形中心点"""
     x = sum(p[0] for p in polygon) / len(polygon)
     y = sum(p[1] for p in polygon) / len(polygon)
     return [x, y]
 
-def get_side_offset_point(polygon, side='left', offset_dist=0.0001):
-    """获取多边形外侧的偏移控制点"""
-    centroid = get_polygon_centroid(polygon)
-    # 找到多边形最外侧的点
-    farthest_point = max(polygon, key=lambda p: distance(centroid, p))
-    
-    # 计算从中心到最外侧点的方向向量
-    dx = farthest_point[0] - centroid[0]
-    dy = farthest_point[1] - centroid[1]
-    length = math.hypot(dx, dy)
-    if length > 0:
-        dx /= length
-        dy /= length
-    
-    # 根据绕行方向选择偏移方向
-    if side == 'left':
-        # 左绕行：垂直于主方向向左偏移
-        perp_x = -dy
-        perp_y = dx
-    else:
-        # 右绕行：垂直于主方向向右偏移
-        perp_x = dy
-        perp_y = -dx
-    
-    # 生成偏移点
-    offset_point = [
-        farthest_point[0] + perp_x * offset_dist,
-        farthest_point[1] + perp_y * offset_dist
-    ]
-    
-    return offset_point
+def get_bounding_box(polygon):
+    """获取多边形边界框"""
+    min_x = min(p[0] for p in polygon)
+    max_x = max(p[0] for p in polygon)
+    min_y = min(p[1] for p in polygon)
+    max_y = max(p[1] for p in polygon)
+    return [min_x, max_x, min_y, max_y]
 
 # ===== 航点距离抽稀函数 =====
 def simplify_path_by_distance(points, min_dist_deg=0.0003):
@@ -217,7 +212,7 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
                     return True
     return False
 
-# ==================== 【全新实现】可靠的左/右绕行路径生成 ====================
+# ==================== 可靠的单侧绕行路径生成 ====================
 def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     """
     生成左绕行或右绕行路径
@@ -232,118 +227,114 @@ def generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe
     safe_radius_deg = safe_radius / 111000.0
     
     # 尝试不同的偏移距离倍数
-    offset_scales = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0]
+    offset_scales = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0]
     
     for scale in offset_scales:
         current_offset = safe_radius_deg * scale
         
         # 构建绕行路径
         full_path = [start]
-        current_pos = start
         
-        # 为每个障碍物生成绕行点
+        # 计算起点到终点的方向向量
+        dir_dx = end[0] - start[0]
+        dir_dy = end[1] - start[1]
+        dir_length = math.hypot(dir_dx, dir_dy)
+        if dir_length > 0:
+            dir_dx /= dir_length
+            dir_dy /= dir_length
+        
+        # 根据绕行方向计算垂直方向
+        if side == 'left':
+            perp_dx = -dir_dy
+            perp_dy = dir_dx
+        else:
+            perp_dx = dir_dy
+            perp_dy = -dir_dx
+        
+        # 收集所有需要绕行的障碍物偏移点
+        all_offset_points = []
+        
         for obs in block_obs:
             poly = obs["polygon"]
             if len(poly) < 3:
                 continue
             
-            # 获取多边形中心和外扩点
+            # 获取障碍物的边界框和中心
+            bbox = get_bounding_box(poly)
             centroid = get_polygon_centroid(poly)
             
-            # 计算从起点到终点的方向向量
-            dir_dx = end[0] - start[0]
-            dir_dy = end[1] - start[1]
-            dir_length = math.hypot(dir_dx, dir_dy)
-            if dir_length > 0:
-                dir_dx /= dir_length
-                dir_dy /= dir_length
-            
-            # 根据绕行方向计算垂直方向
-            if side == 'left':
-                # 左绕行：垂直于路径方向向左
-                perp_dx = -dir_dy
-                perp_dy = dir_dx
-            else:
-                # 右绕行：垂直于路径方向向右
-                perp_dx = dir_dy
-                perp_dy = -dir_dx
-            
-            # 生成绕行关键点
-            # 1. 入点前偏移点
-            approach_offset = current_offset * 2
-            
-            # 找到多边形在路径上的投影区间
-            path_line = [start, end]
+            # 计算从起点到终点的直线与障碍物的交点
             intersect_points = []
-            
-            # 找到路径与多边形的交点
             n = len(poly)
             for i in range(n):
                 p1 = poly[i]
                 p2 = poly[(i+1)%n]
-                inter = seg_intersection(path_line[0], path_line[1], p1, p2)
+                inter = seg_intersection(start, end, p1, p2)
                 if inter:
                     intersect_points.append(inter)
             
             if len(intersect_points) >= 2:
                 # 按距离起点排序
                 intersect_points.sort(key=lambda p: distance(start, p))
-                entry_point = intersect_points[0]
-                exit_point = intersect_points[-1]
+                entry_region = intersect_points[0]
+                exit_region = intersect_points[-1]
             else:
-                # 如果没有交点，使用多边形边界上的最近点
-                entry_point = min(poly, key=lambda p: distance(start, p))
-                exit_point = min(poly, key=lambda p: distance(end, p))
+                # 如果没有交点，使用多边形上离起点和终点最近的点
+                entry_region = min(poly, key=lambda p: distance(start, p))
+                exit_region = min(poly, key=lambda p: distance(end, p))
             
-            # 计算偏移后的绕行点
-            # 入点偏移
+            # 生成偏移点（在垂直方向上偏移）
             entry_offset = [
-                entry_point[0] + perp_dx * current_offset,
-                entry_point[1] + perp_dy * current_offset
+                entry_region[0] + perp_dx * current_offset,
+                entry_region[1] + perp_dy * current_offset
             ]
             
-            # 出点偏移
             exit_offset = [
-                exit_point[0] + perp_dx * current_offset,
-                exit_point[1] + perp_dy * current_offset
+                exit_region[0] + perp_dx * current_offset,
+                exit_region[1] + perp_dy * current_offset
             ]
             
-            # 中间额外控制点（使路径更平滑）
+            # 添加中间点使路径更平滑
             mid_offset = [
-                (entry_offset[0] + exit_offset[0]) / 2 + perp_dx * current_offset * 0.5,
-                (entry_offset[1] + exit_offset[1]) / 2 + perp_dy * current_offset * 0.5
+                (entry_offset[0] + exit_offset[0]) / 2 + perp_dx * current_offset * 0.3,
+                (entry_offset[1] + exit_offset[1]) / 2 + perp_dy * current_offset * 0.3
             ]
             
-            # 构建这段路径
-            segment_points = [entry_offset, mid_offset, exit_offset]
+            all_offset_points.append(entry_offset)
+            all_offset_points.append(mid_offset)
+            all_offset_points.append(exit_offset)
+        
+        # 去重并排序（按路径方向）
+        if all_offset_points:
+            # 按距离起点的距离排序
+            all_offset_points.sort(key=lambda p: distance(start, p))
+            
+            # 去重
+            unique_points = []
+            for p in all_offset_points:
+                if not unique_points or distance(unique_points[-1], p) > 1e-8:
+                    unique_points.append(p)
             
             # 添加到完整路径
-            full_path.extend(segment_points)
-            current_pos = exit_offset
+            full_path.extend(unique_points)
         
         # 添加终点
-        full_path.append(end)
-        
-        # 去重
-        unique_path = []
-        for p in full_path:
-            if not unique_path or distance(unique_path[-1], p) > 1e-10:
-                unique_path.append(p)
+        if distance(full_path[-1], end) > 1e-8:
+            full_path.append(end)
         
         # 碰撞检测
         collision = False
-        for i in range(len(unique_path) - 1):
-            if is_path_blocked(unique_path[i], unique_path[i+1], obstacles_gcj, flight_height):
+        for i in range(len(full_path) - 1):
+            if is_path_blocked(full_path[i], full_path[i+1], obstacles_gcj, flight_height):
                 collision = True
                 break
         
-        if not collision:
+        if not collision and len(full_path) >= 2:
             # 平滑路径
-            smoothed = catmull_rom_spline(unique_path, num_points=8)
+            smoothed = catmull_rom_spline(full_path, num_points=6)
             final_path = simplify_path_by_distance(smoothed)
             return final_path
     
-    # 所有偏移尝试失败，返回None
     return None
 
 # ==================== A*路径规划（备用） ====================
@@ -453,7 +444,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
 
     # 直线被阻挡，根据策略选择绕行方式
     if strategy == 'left':
-        add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向左绕行 | 障碍物高度 > 飞行高度{flight_height}m")
+        add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向左绕行 | 飞行高度:{flight_height}m")
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
         if p and len(p) >= 2:
             path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]), 1)
@@ -466,7 +457,7 @@ def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius,
             add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* (备用) | 航点数:{len(ast_p)} | 路径长度:{path_length}m")
             return ast_p
     elif strategy == 'right':
-        add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向右绕行 | 障碍物高度 > 飞行高度{flight_alt}m")
+        add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向右绕行 | 飞行高度:{flight_height}m")
         p = generate_parallel_offset_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
         if p and len(p) >= 2:
             path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]), 1)
@@ -784,7 +775,7 @@ def main():
                 st.session_state.points_gcj['A'] = [a_lng, a_lat]
                 st.session_state.planned_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles_gcj, flight_alt, safe_radius, selected_strategy
+                    st.session_state.obstacles_gcj, st.session_state.flight_altitude, safe_radius, selected_strategy
                 )
                 st.rerun()
 
@@ -795,7 +786,7 @@ def main():
                 st.session_state.points_gcj['B'] = [b_lng, b_lat]
                 st.session_state.planned_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles_gcj, flight_alt, safe_radius, selected_strategy
+                    st.session_state.obstacles_gcj, st.session_state.flight_altitude, safe_radius, selected_strategy
                 )
                 st.rerun()
 
@@ -814,7 +805,7 @@ def main():
                     st.session_state.pending_polygon = None
                     st.session_state.planned_path = create_avoidance_path(
                         st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                        st.session_state.obstacles_gcj, flight_alt, safe_radius, selected_strategy
+                        st.session_state.obstacles_gcj, st.session_state.flight_altitude, safe_radius, selected_strategy
                     )
                     st.rerun()
                 else:
@@ -823,7 +814,7 @@ def main():
             if st.button("🔄 重新规划路径", use_container_width=True):
                 st.session_state.planned_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles_gcj, flight_alt, safe_radius, selected_strategy
+                    st.session_state.obstacles_gcj, st.session_state.flight_altitude, safe_radius, selected_strategy
                 )
                 st.rerun()
 
@@ -832,7 +823,7 @@ def main():
             with c1:
                 if st.button("▶️ 开始飞行", use_container_width=True):
                     path = st.session_state.planned_path or [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
-                    st.session_state.heartbeat_sim.set_path(path, flight_alt, drone_speed)
+                    st.session_state.heartbeat_sim.set_path(path, st.session_state.flight_altitude, drone_speed)
                     st.session_state.simulation_running = True
                     st.session_state.flight_history = []
                     st.success("已开始飞行")
@@ -847,7 +838,7 @@ def main():
             if st.session_state.planned_path is None:
                 st.session_state.planned_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles_gcj, flight_alt, safe_radius, selected_strategy
+                    st.session_state.obstacles_gcj, st.session_state.flight_altitude, safe_radius, selected_strategy
                 )
             m = create_planning_map(center, st.session_state.points_gcj, st.session_state.obstacles_gcj,
                                    st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked, safe_radius)
@@ -873,7 +864,7 @@ def main():
             with c1:
                 if st.button("开始任务", type="primary", use_container_width=True):
                     path = st.session_state.planned_path or [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
-                    st.session_state.heartbeat_sim.set_path(path, flight_alt, drone_speed)
+                    st.session_state.heartbeat_sim.set_path(path, st.session_state.flight_altitude, drone_speed)
                     st.session_state.simulation_running = True
                     st.session_state.flight_history = []
                     st.rerun()
