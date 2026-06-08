@@ -178,12 +178,25 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
                     return True
     return False
 
-# ==================== 单侧绕行路径生成（简化版） ====================
+# ==================== 辅助函数：判断点在线段右侧 ====================
+def is_point_right_of_line(point, line_start, line_end):
+    """
+    判断点是否在线段右侧（使用叉积）
+    返回 True 表示在右侧，False 表示在左侧或共线
+    """
+    ax, ay = line_start
+    bx, by = line_end
+    px, py = point
+    cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    return cross < 0
+
+# ==================== 单侧绕行路径生成（改进版，重点修复右绕行） ====================
 def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     """
     生成左绕行或右绕行路径
     side: 'left' 或 'right'
     原理：在起点和终点之间添加一个偏移控制点，让路径从障碍物左侧或右侧绕过
+    修复：针对右绕行增加了方向校验和更大的偏移距离
     """
     # 获取需要绕行的障碍物
     block_obs = [obs for obs in obstacles_gcj if is_obstacle_blocking(obs, flight_height)]
@@ -230,8 +243,7 @@ def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_rad
     avg_cx = sum(c[0] for c in all_centers) / len(all_centers)
     avg_cy = sum(c[1] for c in all_centers) / len(all_centers)
     
-    # 计算偏移距离（根据安全半径和障碍物大小调整）
-    # 获取最远障碍物的距离
+    # 获取最远障碍物的距离（障碍物半径）
     max_dist_to_center = 0
     for obs in block_obs:
         poly = obs["polygon"]
@@ -240,40 +252,35 @@ def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_rad
             if dist > max_dist_to_center:
                 max_dist_to_center = dist
     
-    # 偏移距离 = 障碍物半径 + 安全半径的倍数
-    offset_distance = max_dist_to_center + safe_radius_deg * 3
+    # 根据绕行方向决定初始偏移倍数（右绕行使用更大的基数）
+    if side == 'right':
+        base_scale = 5   # 右绕行起始偏移更大
+        scale_list = [5, 6, 7, 8, 10, 12, 15]  # 更大的尝试范围
+    else:
+        base_scale = 3
+        scale_list = [3, 4, 5, 6, 7, 8, 10]
     
-    # 生成偏移点
-    offset_point = [
-        avg_cx + perp_x * offset_distance,
-        avg_cy + perp_y * offset_distance
-    ]
-    
-    # 构建路径：起点 -> 偏移点 -> 终点
-    path = [start, offset_point, end]
-    
-    # 碰撞检测
-    collision = False
-    for i in range(len(path) - 1):
-        if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height):
-            collision = True
-            break
-    
-    if not collision:
-        # 平滑路径
-        smoothed = catmull_rom_spline(path, num_points=8)
-        final_path = simplify_path_by_distance(smoothed)
-        return final_path
-    
-    # 如果失败，尝试更大的偏移距离
-    for scale in [4, 5, 6, 7, 8, 10]:
+    # 生成偏移点并尝试检测碰撞
+    for scale in scale_list:
         offset_distance = max_dist_to_center + safe_radius_deg * scale
         offset_point = [
             avg_cx + perp_x * offset_distance,
             avg_cy + perp_y * offset_distance
         ]
+        
+        # 对于右绕行，额外检查偏移点是否真的在航线右侧，若不在则修正方向
+        if side == 'right':
+            if not is_point_right_of_line(offset_point, start, end):
+                # 如果在左侧，则向相反方向偏移（即真正的右侧）
+                offset_point = [
+                    avg_cx - perp_x * offset_distance,
+                    avg_cy - perp_y * offset_distance
+                ]
+        
+        # 构建路径：起点 -> 偏移点 -> 终点
         path = [start, offset_point, end]
         
+        # 碰撞检测
         collision = False
         for i in range(len(path) - 1):
             if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height):
@@ -281,6 +288,7 @@ def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_rad
                 break
         
         if not collision:
+            # 平滑路径
             smoothed = catmull_rom_spline(path, num_points=8)
             final_path = simplify_path_by_distance(smoothed)
             return final_path
